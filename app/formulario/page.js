@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { collection, onSnapshot } from "firebase/firestore";
 import { getFirebaseServices } from "@/lib/firebase";
 import {
@@ -11,11 +11,23 @@ import {
   normalizePregunta
 } from "@/lib/faq";
 
+const ALL_PROJECTS = "__todos__";
+const RESULT_LIMIT = 24;
+
 function makeTicket() {
   const now = new Date();
   const year = now.getFullYear();
   const rand = Math.floor(100000 + Math.random() * 900000);
   return `SI-${year}-${rand}`;
+}
+
+function normalizeSearch(value) {
+  return String(value || "")
+    .toLocaleLowerCase("es")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9ñ]+/g, " ")
+    .trim();
 }
 
 function stageComparator(a, b) {
@@ -28,12 +40,43 @@ function stageComparator(a, b) {
   return a.localeCompare(b, "es");
 }
 
+function getSearchScore(item, tokens, normalizedQuery) {
+  if (!tokens.length) return 1;
+
+  const question = normalizeSearch(item.pregunta);
+  const answer = normalizeSearch(item.respuesta);
+  const context = normalizeSearch(`${item.proyecto} ${item.etapa}`);
+  const allText = `${question} ${answer} ${context}`;
+
+  if (!tokens.every((token) => allText.includes(token))) return -1;
+
+  let score = 0;
+  if (question === normalizedQuery) score += 100;
+  if (question.startsWith(normalizedQuery)) score += 40;
+  if (question.includes(normalizedQuery)) score += 25;
+
+  for (const token of tokens) {
+    if (question.includes(token)) score += 8;
+    if (context.includes(token)) score += 3;
+    if (answer.includes(token)) score += 1;
+  }
+
+  return score;
+}
+
 export default function Home() {
   const [faqs, setFaqs] = useState([]);
   const [loadingFaqs, setLoadingFaqs] = useState(true);
   const [faqError, setFaqError] = useState("");
-
   const [project, setProject] = useState("NICE");
+  const [stage, setStage] = useState("");
+  const [search, setSearch] = useState("");
+  const [showFilters, setShowFilters] = useState(false);
+  const [selectedQuestionId, setSelectedQuestionId] = useState("");
+  const [supportQuestionId, setSupportQuestionId] = useState("");
+  const [supportOpen, setSupportOpen] = useState(false);
+  const supportRef = useRef(null);
+
   const [form, setForm] = useState({
     name: "",
     dni: "",
@@ -41,9 +84,6 @@ export default function Home() {
     email2: "",
     phone: ""
   });
-  const [stage, setStage] = useState("");
-  const [questionId, setQuestionId] = useState("");
-  const [customMode, setCustomMode] = useState(false);
   const [customQuery, setCustomQuery] = useState("");
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState(null);
@@ -56,9 +96,7 @@ export default function Home() {
         collection(db, FAQ_COLLECTION),
         (snapshot) => {
           const data = snapshot.docs
-            .map((item) =>
-              normalizePregunta(item.id, item.data())
-            )
+            .map((item) => normalizePregunta(item.id, item.data()))
             .filter(Boolean)
             .sort(comparePreguntas);
 
@@ -68,18 +106,27 @@ export default function Home() {
         },
         () => {
           setFaqError(
-            "No pudimos cargar las preguntas en este momento. Podés escribir una consulta libre."
+            "No pudimos cargar las preguntas en este momento. Podés enviarnos tu consulta."
           );
           setLoadingFaqs(false);
         }
       );
     } catch {
       setFaqError(
-        "El formulario de preguntas no está configurado. Podés escribir una consulta libre."
+        "El buscador de preguntas no está disponible. Podés enviarnos tu consulta."
       );
       setLoadingFaqs(false);
       return undefined;
     }
+  }, []);
+
+  useEffect(() => {
+    function closeOnEscape(event) {
+      if (event.key === "Escape") setSelectedQuestionId("");
+    }
+
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
   }, []);
 
   const publicFaqs = useMemo(
@@ -96,90 +143,83 @@ export default function Home() {
   const projects = useMemo(
     () =>
       [...new Set([...DEFAULT_PROJECTS, ...publicFaqs.map((item) => item.proyecto)])]
-        .filter(Boolean),
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b, "es")),
     [publicFaqs]
   );
 
-  const stages = useMemo(
-    () =>
-      [...new Set(
-        publicFaqs
-          .filter((item) => item.proyecto === project)
-          .map((item) => item.etapa)
-      )].sort(stageComparator),
-    [publicFaqs, project]
-  );
+  const stages = useMemo(() => {
+    const candidates = publicFaqs
+      .filter((item) => project === ALL_PROJECTS || item.proyecto === project)
+      .map((item) => item.etapa);
 
-  const questions = useMemo(
-    () =>
-      publicFaqs
-        .filter(
-          (item) =>
-            item.proyecto === project &&
-            item.etapa === stage
-        )
-        .sort((a, b) => a.orden - b.orden || a.pregunta.localeCompare(b.pregunta, "es")),
-    [publicFaqs, project, stage]
-  );
+    return [...new Set(candidates)].filter(Boolean).sort(stageComparator);
+  }, [publicFaqs, project]);
+
+  const filteredFaqs = useMemo(() => {
+    const normalizedQuery = normalizeSearch(search);
+    const tokens = normalizedQuery.split(/\s+/).filter(Boolean);
+
+    return publicFaqs
+      .filter(
+        (item) =>
+          (project === ALL_PROJECTS || item.proyecto === project) &&
+          (!stage || item.etapa === stage)
+      )
+      .map((item) => ({
+        item,
+        score: getSearchScore(item, tokens, normalizedQuery)
+      }))
+      .filter(({ score }) => score >= 0)
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          a.item.orden - b.item.orden ||
+          a.item.pregunta.localeCompare(b.item.pregunta, "es")
+      )
+      .slice(0, RESULT_LIMIT)
+      .map(({ item }) => item);
+  }, [project, publicFaqs, search, stage]);
 
   const selectedQuestion = useMemo(
-    () => questions.find((item) => item.id === questionId) || null,
-    [questionId, questions]
+    () => publicFaqs.find((item) => item.id === selectedQuestionId) || null,
+    [publicFaqs, selectedQuestionId]
+  );
+
+  const supportQuestion = useMemo(
+    () => publicFaqs.find((item) => item.id === supportQuestionId) || null,
+    [publicFaqs, supportQuestionId]
   );
 
   useEffect(() => {
-    if (stages.length === 0) {
-      setStage("");
-      setQuestionId("");
-      return;
-    }
-
-    if (!stages.includes(stage)) {
-      setStage(stages[0]);
-      setQuestionId("");
-      setCustomMode(false);
-      setCustomQuery("");
-      setResult(null);
-      setError("");
-    }
+    if (stage && !stages.includes(stage)) setStage("");
   }, [stage, stages]);
+
+  function chooseProject(value) {
+    setProject(value);
+    setStage("");
+    setSelectedQuestionId("");
+    setResult(null);
+    setError("");
+  }
 
   function updateField(key, value) {
     setForm((previous) => ({ ...previous, [key]: value }));
   }
 
-  function chooseProject(value) {
-    setProject(value);
-    setStage("");
-    setQuestionId("");
-    setCustomMode(false);
-    setCustomQuery("");
+  function openSupport(question = selectedQuestion) {
+    setSupportQuestionId(question?.id || "");
+    setSelectedQuestionId("");
+    setSupportOpen(true);
     setResult(null);
     setError("");
-  }
-
-  function chooseStage(value) {
-    setStage(value);
-    setQuestionId("");
-    setCustomMode(false);
-    setCustomQuery("");
-    setResult(null);
-    setError("");
-  }
-
-  function chooseQuestion(value) {
-    setQuestionId(value);
-    setCustomMode(false);
-    setCustomQuery("");
-    setResult(null);
-    setError("");
-  }
-
-  function chooseCustom() {
-    setQuestionId("");
-    setCustomMode(true);
-    setResult(null);
-    setError("");
+    if (question) {
+      setCustomQuery(`Consulté “${question.pregunta}”, pero todavía necesito saber: `);
+    }
+    window.setTimeout(
+      () => supportRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
+      50
+    );
   }
 
   async function submit(event) {
@@ -202,28 +242,25 @@ export default function Home() {
       return;
     }
 
-    if (!selectedQuestion && !customMode) {
-      setError("Seleccioná una consulta o elegí la opción de consulta libre.");
-      return;
-    }
-
-    if (customMode && !customQuery.trim()) {
-      setError("Escribí brevemente tu consulta.");
+    if (!customQuery.trim()) {
+      setError("Escribí brevemente qué necesitás consultar.");
       return;
     }
 
     const ticket = makeTicket();
-    const consulta = customMode ? customQuery.trim() : selectedQuestion.pregunta;
     const payload = {
       ticket,
-      proyecto: project,
+      proyecto:
+        supportQuestion?.proyecto ||
+        (project === ALL_PROJECTS ? "Sin definir" : project),
       nombre: form.name.trim(),
       dni: form.dni.trim(),
       email: form.email.trim(),
       telefono: form.phone.trim(),
-      etapa: stage || "Sin etapa",
-      consulta,
-      preguntaId: selectedQuestion?.id || null
+      etapa: supportQuestion?.etapa || stage || "Sin etapa",
+      consulta: customQuery.trim(),
+      preguntaId: supportQuestion?.id || null,
+      preguntaOrigen: supportQuestion?.pregunta || null
     };
 
     setSending(true);
@@ -244,230 +281,283 @@ export default function Home() {
         if (!response.ok) throw new Error("No se pudo registrar la consulta.");
       }
 
-      setResult({
-        ticket,
-        answer:
-          !customMode && selectedQuestion
-            ? selectedQuestion.respuesta
-            : "Tu consulta quedó registrada. El equipo de Selección e Ingreso podrá revisarla con los datos informados."
-      });
+      setResult({ ticket });
     } catch {
-      setError(
-        "No pudimos registrar la consulta. Intentá nuevamente en unos minutos."
-      );
+      setError("No pudimos registrar la consulta. Intentá nuevamente en unos minutos.");
     } finally {
       setSending(false);
     }
   }
 
-  function resetQuestion() {
-    setQuestionId("");
-    setCustomMode(false);
-    setCustomQuery("");
-    setResult(null);
-    setError("");
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
-
   return (
-    <main className="page">
-      <header className="hero">
-        <div style={{ marginBottom: "30px", textAlign: "center" }}>
-          <h1>Formulario de Consultas</h1>
-          <p>Departamento de Selección e Ingreso | ISSP</p>
+    <main className="faq-page">
+      <header className="faq-hero">
+        <img src="/logo-horizontal.webp" alt="ISSP" className="faq-logo" />
+        <div>
+          <h1>¿En qué podemos ayudarte?</h1>
+          <p>Encontrá una respuesta rápida sobre tu proceso de selección e ingreso.</p>
         </div>
       </header>
 
-      <form onSubmit={submit} className="formWrap">
-        <section className="card">
-          <h2>1. Proyecto</h2>
-          <label>¿A qué proceso corresponde tu consulta?</label>
-          <select
-            value={project}
-            onChange={(event) => chooseProject(event.target.value)}
-          >
-            {projects.map((item) => (
-              <option key={item} value={item}>
-                {item}
-              </option>
-            ))}
-          </select>
-        </section>
-
-        <section className="card">
-          <h2>2. Datos Personales</h2>
-
-          <div className="twoCols">
+      <div className="faq-shell">
+        <section className="faq-search-card" aria-labelledby="faq-search-title">
+          <div className="faq-project-row">
             <div>
-              <label>Apellido y nombre</label>
-              <input
-                value={form.name}
-                onChange={(event) => updateField("name", event.target.value)}
-                placeholder="Ingresá apellido y nombre"
-              />
+              <label htmlFor="faq-project">Proceso</label>
+              <p className="faq-field-help">Elegí uno o buscá en todos si no estás seguro.</p>
             </div>
-            <div>
-              <label>DNI</label>
+            <select
+              id="faq-project"
+              value={project}
+              onChange={(event) => chooseProject(event.target.value)}
+            >
+              {projects.map((item) => (
+                <option key={item} value={item}>{item}</option>
+              ))}
+              <option value={ALL_PROJECTS}>No estoy seguro / buscar en todos</option>
+            </select>
+          </div>
+
+          <div className="faq-search-block">
+            <label id="faq-search-title" htmlFor="faq-search">
+              Escribí tu duda o algunas palabras
+            </label>
+            <div className="faq-search-input-wrap">
+              <span aria-hidden="true" className="faq-search-icon">⌕</span>
               <input
-                value={form.dni}
-                onChange={(event) =>
-                  updateField("dni", event.target.value.replace(/\D/g, ""))
-                }
-                inputMode="numeric"
-                placeholder="Sin puntos"
+                id="faq-search"
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Ej.: inscripción, documentación, examen médico…"
+                autoComplete="off"
               />
+              {search && (
+                <button type="button" className="faq-clear" onClick={() => setSearch("")}>
+                  Limpiar
+                </button>
+              )}
             </div>
           </div>
 
-          <label>Correo electrónico</label>
-          <input
-            type="email"
-            value={form.email}
-            onChange={(event) => updateField("email", event.target.value)}
-            placeholder="nombre@correo.com"
-          />
-
-          <label>Repetir correo electrónico</label>
-          <input
-            type="email"
-            value={form.email2}
-            onChange={(event) => updateField("email2", event.target.value)}
-            placeholder="Repetí el correo"
-          />
-
-          <label>Teléfono celular</label>
-          <input
-            value={form.phone}
-            onChange={(event) => updateField("phone", event.target.value)}
-            inputMode="tel"
-            placeholder="Ej.: 11 1234 5678"
-          />
-        </section>
-
-        <section className="card">
-          <h2>3. Etapa del proceso</h2>
-          <p className="helper">
-            Elegí una etapa. Debajo aparecerán las preguntas activas cargadas
-            desde el panel administrativo.
-          </p>
-
-          {loadingFaqs ? (
-            <p className="helper">Cargando preguntas…</p>
-          ) : (
-            <>
-              {faqError && <div className="errorBox">{faqError}</div>}
-
-              {stages.length > 0 ? (
-                <div className="stageList">
-                  {stages.map((item) => (
-                    <button
-                      type="button"
-                      key={item}
-                      className={`optionButton ${stage === item ? "selected" : ""}`}
-                      onClick={() => chooseStage(item)}
-                    >
-                      {item}
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <p className="helper">
-                  Todavía no hay preguntas activas para {project}.
-                </p>
-              )}
-
-              {stage && (
-                <>
-                  <div className="divider" />
-                  <h3>Preguntas de {stage}</h3>
-                  <div className="questionList">
-                    {questions.map((item) => (
-                      <button
-                        type="button"
-                        key={item.id}
-                        className={`optionButton ${
-                          questionId === item.id ? "selected" : ""
-                        }`}
-                        onClick={() => chooseQuestion(item.id)}
-                      >
-                        {item.pregunta}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-            </>
-          )}
-
-          <div className={stage ? "" : "divider"} />
-
           <button
             type="button"
-            className={`optionButton dashed ${customMode ? "selected" : ""}`}
-            onClick={chooseCustom}
+            className="faq-filter-toggle"
+            aria-expanded={showFilters}
+            onClick={() => setShowFilters((value) => !value)}
           >
-            No encuentro mi consulta entre estas opciones
+            {showFilters ? "Ocultar filtros" : "Filtrar por etapa (opcional)"}
+            <span aria-hidden="true">{showFilters ? "▲" : "▼"}</span>
           </button>
 
-          {customMode && (
-            <div className="customQuery">
-              <label>Escribí brevemente tu consulta</label>
-              <textarea
-                value={customQuery}
-                onChange={(event) => setCustomQuery(event.target.value)}
-                placeholder="Contanos qué necesitás consultar."
-                rows={5}
-              />
+          {showFilters && (
+            <div className="faq-filter-panel">
+              <label htmlFor="faq-stage">Etapa del proceso</label>
+              <select
+                id="faq-stage"
+                value={stage}
+                onChange={(event) => setStage(event.target.value)}
+              >
+                <option value="">Todas las etapas</option>
+                {stages.map((item) => (
+                  <option key={item} value={item}>{item}</option>
+                ))}
+              </select>
             </div>
           )}
         </section>
 
-        <section className="card">
-          <h2>4. Envío</h2>
-          <p className="helper">
-            Al enviar, tu consulta queda registrada. Si seleccionaste una
-            pregunta frecuente, verás su respuesta actualizada.
-          </p>
+        <section className="faq-results" aria-live="polite">
+          <div className="faq-results-heading">
+            <div>
+              <h2>{search ? "Resultados de búsqueda" : "Preguntas frecuentes"}</h2>
+              {!loadingFaqs && (
+                <p>
+                  {filteredFaqs.length
+                    ? `${filteredFaqs.length} pregunta${filteredFaqs.length === 1 ? "" : "s"} para consultar`
+                    : "No encontramos una pregunta relacionada"}
+                </p>
+              )}
+            </div>
+          </div>
 
-          {error && <div className="errorBox">{error}</div>}
-
-          {!result ? (
-            <button className="submitButton" type="submit" disabled={sending}>
-              {sending ? "Enviando..." : "Enviar consulta"}
-            </button>
+          {loadingFaqs ? (
+            <div className="faq-status">Cargando preguntas…</div>
+          ) : faqError ? (
+            <div className="faq-error">{faqError}</div>
+          ) : filteredFaqs.length ? (
+            <div className="faq-question-list">
+              {filteredFaqs.map((item) => (
+                <button
+                  type="button"
+                  key={item.id}
+                  className="faq-question"
+                  onClick={() => setSelectedQuestionId(item.id)}
+                >
+                  <span className="faq-question-number">N.º {item.orden}</span>
+                  <span className="faq-question-copy">
+                    <strong>{item.pregunta}</strong>
+                    <small>{item.proyecto} · {item.etapa}</small>
+                  </span>
+                  <span className="faq-chevron" aria-hidden="true">›</span>
+                </button>
+              ))}
+            </div>
           ) : (
-            <>
-              <div className="successBox">
-                <strong>Ticket {result.ticket}</strong>
-                <p>{result.answer}</p>
-              </div>
+            <div className="faq-empty">
+              <strong>Probá con menos palabras o con otro término.</strong>
+              <p>También podés buscar en todos los procesos o enviarnos tu consulta.</p>
+            </div>
+          )}
 
+          <button type="button" className="faq-support-link" onClick={() => openSupport(null)}>
+            No encuentro mi respuesta
+          </button>
+        </section>
+
+        {supportOpen && (
+          <section className="faq-contact-card" ref={supportRef}>
+            <div className="faq-contact-heading">
+              <div>
+                <span className="faq-eyebrow">Consulta personalizada</span>
+                <h2>Contanos qué necesitás</h2>
+                <p>Completá tus datos únicamente si no encontraste la respuesta.</p>
+              </div>
               <button
                 type="button"
-                className="secondaryButton"
-                onClick={resetQuestion}
+                className="faq-close-inline"
+                onClick={() => setSupportOpen(false)}
               >
-                ¿Tenés otra consulta? Hacer otra pregunta
+                Cerrar
               </button>
-            </>
-          )}
-        </section>
-      </form>
+            </div>
 
-      <footer>
+            {!result ? (
+              <form onSubmit={submit}>
+                <label htmlFor="faq-query">Tu consulta</label>
+                <textarea
+                  id="faq-query"
+                  value={customQuery}
+                  onChange={(event) => setCustomQuery(event.target.value)}
+                  placeholder="Describí brevemente tu duda."
+                  rows={5}
+                />
+
+                <div className="faq-two-cols">
+                  <div>
+                    <label htmlFor="faq-name">Apellido y nombre</label>
+                    <input
+                      id="faq-name"
+                      value={form.name}
+                      onChange={(event) => updateField("name", event.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="faq-dni">DNI</label>
+                    <input
+                      id="faq-dni"
+                      value={form.dni}
+                      inputMode="numeric"
+                      onChange={(event) => updateField("dni", event.target.value.replace(/\D/g, ""))}
+                    />
+                  </div>
+                </div>
+
+                <div className="faq-two-cols">
+                  <div>
+                    <label htmlFor="faq-email">Correo electrónico</label>
+                    <input
+                      id="faq-email"
+                      type="email"
+                      value={form.email}
+                      onChange={(event) => updateField("email", event.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="faq-email2">Repetir correo</label>
+                    <input
+                      id="faq-email2"
+                      type="email"
+                      value={form.email2}
+                      onChange={(event) => updateField("email2", event.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <label htmlFor="faq-phone">Teléfono celular</label>
+                <input
+                  id="faq-phone"
+                  value={form.phone}
+                  inputMode="tel"
+                  onChange={(event) => updateField("phone", event.target.value)}
+                />
+
+                {error && <div className="faq-error">{error}</div>}
+                <button className="faq-primary-button" type="submit" disabled={sending}>
+                  {sending ? "Enviando…" : "Enviar consulta"}
+                </button>
+              </form>
+            ) : (
+              <div className="faq-success">
+                <strong>Consulta enviada</strong>
+                <p>Tu número de seguimiento es {result.ticket}.</p>
+              </div>
+            )}
+          </section>
+        )}
+      </div>
+
+      {selectedQuestion && (
         <div
-          style={{
-            textAlign: "center",
-            padding: "20px",
-            color: "var(--muted)",
-            fontSize: "12px",
-            borderTop: "1px solid #e0e0e0"
+          className="faq-modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setSelectedQuestionId("");
           }}
         >
-          Instituto Superior de Seguridad Pública (ISSP) · Departamento de
-          Selección e Ingreso
-          <br />© {new Date().getFullYear()} Todos los derechos reservados
+          <section
+            className="faq-answer-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="faq-answer-title"
+          >
+            <button
+              type="button"
+              className="faq-modal-close"
+              aria-label="Cerrar respuesta"
+              onClick={() => setSelectedQuestionId("")}
+            >
+              ×
+            </button>
+            <div className="faq-answer-meta">
+              <span>{selectedQuestion.proyecto}</span>
+              <span>{selectedQuestion.etapa}</span>
+              <span>N.º {selectedQuestion.orden}</span>
+            </div>
+            <h2 id="faq-answer-title">{selectedQuestion.pregunta}</h2>
+            <div className="faq-answer-copy">{selectedQuestion.respuesta}</div>
+            <div className="faq-answer-actions">
+              <button
+                type="button"
+                className="faq-primary-button"
+                onClick={() => setSelectedQuestionId("")}
+              >
+                Listo, entendí
+              </button>
+              <button
+                type="button"
+                className="faq-secondary-button"
+                onClick={() => openSupport(selectedQuestion)}
+              >
+                Todavía tengo una duda
+              </button>
+            </div>
+          </section>
         </div>
+      )}
+
+      <footer className="faq-footer">
+        Instituto Superior de Seguridad Pública (ISSP) · Departamento de Selección e Ingreso
       </footer>
     </main>
   );

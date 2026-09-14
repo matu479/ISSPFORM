@@ -602,6 +602,52 @@ export default function AdminFAQ() {
     }
   }
 
+  async function handleEnableAllForTest() {
+    const eligible = preguntas.filter(
+      (pregunta) => pregunta.proyecto !== UNASSIGNED_PROCESS,
+    );
+    const skipped = preguntas.length - eligible.length;
+
+    if (!eligible.length) {
+      setNotice(
+        'Primero asigná un proceso a las preguntas que querés probar.',
+      );
+      return;
+    }
+
+    const confirmed = confirm(
+      `Se marcarán como revisadas y visibles ${eligible.length} preguntas con proceso asignado. ${skipped ? `${skipped} pregunta(s) “Sin asignar” seguirán ocultas. ` : ''}¿Continuar?`,
+    );
+    if (!confirmed) return;
+
+    setSaving(true);
+    setNotice('');
+
+    try {
+      const { db } = getFirebaseServices();
+
+      for (let index = 0; index < eligible.length; index += 400) {
+        const batch = writeBatch(db);
+        for (const pregunta of eligible.slice(index, index + 400)) {
+          batch.update(doc(db, FAQ_COLLECTION, pregunta.id), {
+            revision: 'REVISADA',
+            activo: true,
+            actualizado: serverTimestamp(),
+          });
+        }
+        await batch.commit();
+      }
+
+      setNotice(
+        `${eligible.length} pregunta(s) habilitada(s) para la prueba.${skipped ? ` ${skipped} quedaron ocultas porque todavía no tienen proceso.` : ''}`,
+      );
+    } catch (error) {
+      setNotice(`No se pudieron habilitar: ${getErrorMessage(error)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function handleQuickUpdate(
     pregunta: PreguntaFAQ,
     changes: Partial<Pick<PreguntaFAQ, 'proyecto' | 'revision' | 'activo'>>,
@@ -967,6 +1013,18 @@ export default function AdminFAQ() {
               <option value="PENDIENTE">Pendientes de revisión</option>
               <option value="REVISADA">Revisadas</option>
             </select>
+            <button
+              type="button"
+              onClick={handleEnableAllForTest}
+              disabled={saving || preguntas.length === 0}
+              title="Marca como revisadas y visibles todas las preguntas con proceso asignado"
+              style={{
+                ...styles.testButton,
+                opacity: saving || preguntas.length === 0 ? 0.55 : 1,
+              }}
+            >
+              Habilitar todas para prueba
+            </button>
             <label style={styles.importButton}>
               {saving ? 'Procesando…' : 'Importar Word/CSV'}
               <input
@@ -1325,6 +1383,16 @@ const styles: Record<string, React.CSSProperties> = {
     background: '#fff',
     color: '#003d7a',
     border: '1px solid #003d7a',
+    borderRadius: 7,
+    cursor: 'pointer',
+    fontWeight: 700,
+  },
+  testButton: {
+    minHeight: 46,
+    padding: '10px 18px',
+    background: '#7c3aed',
+    color: '#fff',
+    border: 0,
     borderRadius: 7,
     cursor: 'pointer',
     fontWeight: 700,
