@@ -135,7 +135,9 @@ function canonicalHeader(value: string) {
 
 function detectReviewMarker(value: string): EstadoRevision | '' {
   if (
-    /\[(?:PENDIENTE|REVISAR|FALTA\s+REVISAR|NO\s+REVISADA?)\]/i.test(value)
+    /\[(?:A\s+REVISAR|PENDIENTE|REVISAR|FALTA\s+REVISAR|NO\s+REVISADA?)\]/i.test(
+      value,
+    )
   ) {
     return 'PENDIENTE';
   }
@@ -146,7 +148,7 @@ function detectReviewMarker(value: string): EstadoRevision | '' {
 function stripReviewMarkers(value: string) {
   return value
     .replace(
-      /\s*\[(?:REVISADA?|PENDIENTE|REVISAR|FALTA\s+REVISAR|NO\s+REVISADA?)\]\s*/gi,
+      /\s*\[(?:REVISADA?|A\s+REVISAR|PENDIENTE|REVISAR|FALTA\s+REVISAR|NO\s+REVISADA?)\]\s*/gi,
       ' ',
     )
     .replace(/\s+/g, ' ')
@@ -164,9 +166,11 @@ function processFromHeading(value: string) {
 
 function parseParagraphFaqs(paragraphs: string[]) {
   const rows: string[][] = [
-    ['proyecto', 'pregunta', 'respuesta', 'revision'],
+    ['proyecto', 'numero', 'pregunta', 'respuesta', 'revision'],
   ];
   let currentProcess = UNASSIGNED_PROCESS;
+  let pendingNumber = '';
+  let currentNumber = '';
   let currentQuestion = '';
   let answerParts: string[] = [];
 
@@ -180,8 +184,15 @@ function parseParagraphFaqs(paragraphs: string[]) {
       'PENDIENTE';
 
     if (question && answer) {
-      rows.push([currentProcess, question, answer, revision]);
+      rows.push([
+        currentProcess,
+        currentNumber,
+        question,
+        answer,
+        revision,
+      ]);
     }
+    currentNumber = '';
     currentQuestion = '';
     answerParts = [];
   };
@@ -190,6 +201,15 @@ function parseParagraphFaqs(paragraphs: string[]) {
     for (const rawLine of rawParagraph.split(/\n+/)) {
       const line = rawLine.replace(/^[•·▪◦]\s*/, '').trim();
       if (!line) continue;
+
+      const standaloneNumber = line.match(
+        /^(?:n(?:ro|°|º)?\.?\s*)?(\d+)[).:\-]*$/i,
+      );
+      if (standaloneNumber) {
+        flush();
+        pendingNumber = standaloneNumber[1];
+        continue;
+      }
 
       const headingProcess = processFromHeading(line);
       const letters = line.replace(/[^a-záéíóúüñ]/gi, '');
@@ -206,29 +226,33 @@ function parseParagraphFaqs(paragraphs: string[]) {
       }
 
       const inlinePair = line.match(
-        /^(?:pregunta|consulta)(?:\s+\d+)?\s*[:.-]\s*(.+?)\s+(?:respuesta)(?:\s+(?:modelo|automatica|sugerida))?\s*[:.-]\s*(.+)$/i,
+        /^(?:(\d+)[).:-]?\s*)?(?:pregunta|consulta)(?:\s+\d+)?\s*[:.-]\s*(.+?)\s+(?:respuesta)(?:\s+(?:modelo|automatica|sugerida))?\s*[:.-]\s*(.+)$/i,
       );
       if (inlinePair) {
         flush();
         const revision =
-          detectReviewMarker(inlinePair[1]) ||
           detectReviewMarker(inlinePair[2]) ||
+          detectReviewMarker(inlinePair[3]) ||
           'PENDIENTE';
         rows.push([
           currentProcess,
-          stripReviewMarkers(inlinePair[1]),
+          inlinePair[1] || pendingNumber,
           stripReviewMarkers(inlinePair[2]),
+          stripReviewMarkers(inlinePair[3]),
           revision,
         ]);
+        pendingNumber = '';
         continue;
       }
 
       const questionLabel = line.match(
-        /^(?:\d+[).:-]?\s*)?(?:pregunta|consulta)(?:\s+\d+)?\s*[:.-]\s*(.+)$/i,
+        /^(?:(\d+)[).:-]?\s*)?(?:pregunta|consulta)(?:\s+\d+)?\s*[:.-]\s*(.+)$/i,
       );
       if (questionLabel) {
         flush();
-        currentQuestion = questionLabel[1].trim();
+        currentNumber = questionLabel[1] || pendingNumber;
+        pendingNumber = '';
+        currentQuestion = questionLabel[2].trim();
         continue;
       }
 
@@ -248,7 +272,8 @@ function parseParagraphFaqs(paragraphs: string[]) {
         continue;
       }
 
-      const withoutNumber = line.replace(/^\d+[).:-]?\s*/, '').trim();
+      const numberedLine = line.match(/^(\d+)[).:\-]*\s+(.+)$/);
+      const withoutNumber = (numberedLine?.[2] || line).trim();
       const cleanCandidate = stripReviewMarkers(withoutNumber);
       const looksLikeQuestion =
         cleanCandidate.startsWith('¿') ||
@@ -256,6 +281,8 @@ function parseParagraphFaqs(paragraphs: string[]) {
 
       if (looksLikeQuestion) {
         flush();
+        currentNumber = numberedLine?.[1] || pendingNumber;
+        pendingNumber = '';
         currentQuestion = withoutNumber;
       } else if (currentQuestion) {
         answerParts.push(line);
@@ -978,7 +1005,7 @@ export default function AdminFAQ() {
                 <thead>
                   <tr>
                     <th style={styles.th}>Proceso</th>
-                    <th style={styles.th}>Etapa / orden</th>
+                    <th style={styles.th}>Etapa / N.º</th>
                     <th style={styles.th}>Pregunta y respuesta</th>
                     <th style={styles.th}>Revisión</th>
                     <th style={styles.th}>Visibilidad</th>
@@ -1019,7 +1046,7 @@ export default function AdminFAQ() {
                       <td style={styles.td}>
                         {pregunta.etapa}
                         <br />
-                        <small>Orden {pregunta.orden}</small>
+                        <small>N.º {pregunta.orden}</small>
                       </td>
                       <td style={styles.td}>
                         <strong>{pregunta.pregunta}</strong>
@@ -1138,7 +1165,7 @@ export default function AdminFAQ() {
               </datalist>
             </div>
             <div>
-              <label htmlFor="orden">Orden</label>
+              <label htmlFor="orden">N.º de pregunta</label>
               <input
                 id="orden"
                 type="number"

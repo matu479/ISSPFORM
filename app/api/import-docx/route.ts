@@ -116,6 +116,112 @@ function extractTables(xml: string) {
     .filter((table) => table.length > 0);
 }
 
+type NumberingLevel = {
+  start: number;
+  format: string;
+  levelText: string;
+};
+
+function parseNumbering(numberingXml: string) {
+  const abstractByNumber = new Map<string, string>();
+  const levels = new Map<string, NumberingLevel>();
+
+  for (const match of numberingXml.matchAll(
+    /<w:abstractNum\b([^>]*)>([\s\S]*?)<\/w:abstractNum>/g,
+  )) {
+    const abstractId = match[1].match(/w:abstractNumId="(\d+)"/)?.[1];
+    if (!abstractId) continue;
+
+    for (const levelMatch of match[2].matchAll(
+      /<w:lvl\b([^>]*)>([\s\S]*?)<\/w:lvl>/g,
+    )) {
+      const level = levelMatch[1].match(/w:ilvl="(\d+)"/)?.[1] || '0';
+      const start = Number(
+        levelMatch[2].match(/<w:start\b[^>]*w:val="(\d+)"/)?.[1] || '1',
+      );
+      const format =
+        levelMatch[2].match(/<w:numFmt\b[^>]*w:val="([^"]+)"/)?.[1] ||
+        'decimal';
+      const levelText =
+        levelMatch[2].match(/<w:lvlText\b[^>]*w:val="([^"]+)"/)?.[1] ||
+        `%${Number(level) + 1}.`;
+
+      levels.set(`${abstractId}:${level}`, {
+        start,
+        format,
+        levelText,
+      });
+    }
+  }
+
+  for (const match of numberingXml.matchAll(
+    /<w:num\b([^>]*)>([\s\S]*?)<\/w:num>/g,
+  )) {
+    const numberId = match[1].match(/w:numId="(\d+)"/)?.[1];
+    const abstractId = match[2].match(
+      /<w:abstractNumId\b[^>]*w:val="(\d+)"/,
+    )?.[1];
+
+    if (numberId && abstractId) abstractByNumber.set(numberId, abstractId);
+  }
+
+  return { abstractByNumber, levels };
+}
+
+function extractParagraphs(documentXml: string, numberingXml: string) {
+  const { abstractByNumber, levels } = parseNumbering(numberingXml);
+  const counters = new Map<string, number>();
+
+  return [
+    ...documentXml.matchAll(/<w:p(?:\s[^>]*)?>([\s\S]*?)<\/w:p>/g),
+  ]
+    .map((match) => {
+      const paragraphXml = match[1];
+      const text = extractParagraphText(paragraphXml);
+      if (!text) return '';
+
+      const numberId = paragraphXml.match(
+        /<w:numId\b[^>]*w:val="(\d+)"/,
+      )?.[1];
+      const level =
+        paragraphXml.match(/<w:ilvl\b[^>]*w:val="(\d+)"/)?.[1] || '0';
+      const abstractId = numberId
+        ? abstractByNumber.get(numberId)
+        : undefined;
+      const config = abstractId
+        ? levels.get(`${abstractId}:${level}`)
+        : undefined;
+
+      if (
+        !numberId ||
+        !config ||
+        config.format === 'bullet' ||
+        /^\d+[).:-]?\s+/.test(text)
+      ) {
+        return text;
+      }
+
+      const counterKey = `${numberId}:${level}`;
+      const value = (counters.get(counterKey) ?? config.start - 1) + 1;
+      counters.set(counterKey, value);
+
+      for (const key of [...counters.keys()]) {
+        const [keyNumberId, keyLevel] = key.split(':');
+        if (keyNumberId === numberId && Number(keyLevel) > Number(level)) {
+          counters.delete(key);
+        }
+      }
+
+      const label = config.levelText.replace(/%(\d+)/g, (_, position) => {
+        const referencedLevel = String(Number(position) - 1);
+        return String(counters.get(`${numberId}:${referencedLevel}`) ?? '');
+      });
+
+      return `${label} ${text}`.trim();
+    })
+    .filter(Boolean);
+}
+
 export async function POST(request: Request) {
   try {
     const formData = await request.formData();
@@ -139,11 +245,18 @@ export async function POST(request: Request) {
       'word/document.xml',
     ).toString('utf8');
     const tables = extractTables(documentXml);
-    const paragraphs = [
-      ...documentXml.matchAll(/<w:p(?:\s[^>]*)?>([\s\S]*?)<\/w:p>/g),
-    ]
-      .map((match) => extractParagraphText(match[1]))
-      .filter(Boolean);
+    let numberingXml = '';
+
+    try {
+      numberingXml = extractZipEntry(
+        archive,
+        'word/numbering.xml',
+      ).toString('utf8');
+    } catch {
+      // Los documentos sin listas numeradas no incluyen numbering.xml.
+    }
+
+    const paragraphs = extractParagraphs(documentXml, numberingXml);
 
     if (tables.length === 0 && paragraphs.length === 0) {
       return Response.json(
