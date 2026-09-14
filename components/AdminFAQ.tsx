@@ -616,7 +616,7 @@ export default function AdminFAQ() {
     }
 
     const confirmed = confirm(
-      `Se marcarán como revisadas y visibles ${eligible.length} preguntas con proceso asignado. ${skipped ? `${skipped} pregunta(s) “Sin asignar” seguirán ocultas. ` : ''}¿Continuar?`,
+      `Se harán visibles ${eligible.length} preguntas con proceso asignado. ${skipped ? `${skipped} pregunta(s) “Sin asignar” seguirán ocultas. ` : ''}¿Continuar?`,
     );
     if (!confirmed) return;
 
@@ -630,7 +630,6 @@ export default function AdminFAQ() {
         const batch = writeBatch(db);
         for (const pregunta of eligible.slice(index, index + 400)) {
           batch.update(doc(db, FAQ_COLLECTION, pregunta.id), {
-            revision: 'REVISADA',
             activo: true,
             actualizado: serverTimestamp(),
           });
@@ -639,10 +638,53 @@ export default function AdminFAQ() {
       }
 
       setNotice(
-        `${eligible.length} pregunta(s) habilitada(s) para la prueba.${skipped ? ` ${skipped} quedaron ocultas porque todavía no tienen proceso.` : ''}`,
+        `${eligible.length} pregunta(s) habilitada(s) para la prueba sin modificar su estado de revisión.${skipped ? ` ${skipped} quedaron ocultas porque todavía no tienen proceso.` : ''}`,
       );
     } catch (error) {
       setNotice(`No se pudieron habilitar: ${getErrorMessage(error)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleEndTest() {
+    const pendingVisible = preguntas.filter(
+      (pregunta) =>
+        pregunta.revision === 'PENDIENTE' && pregunta.activo,
+    );
+
+    if (!pendingVisible.length) {
+      setNotice('No hay preguntas pendientes visibles por la prueba.');
+      return;
+    }
+
+    const confirmed = confirm(
+      `Se volverán a ocultar ${pendingVisible.length} preguntas pendientes. Las preguntas revisadas conservarán su visibilidad. ¿Continuar?`,
+    );
+    if (!confirmed) return;
+
+    setSaving(true);
+    setNotice('');
+
+    try {
+      const { db } = getFirebaseServices();
+
+      for (let index = 0; index < pendingVisible.length; index += 400) {
+        const batch = writeBatch(db);
+        for (const pregunta of pendingVisible.slice(index, index + 400)) {
+          batch.update(doc(db, FAQ_COLLECTION, pregunta.id), {
+            activo: false,
+            actualizado: serverTimestamp(),
+          });
+        }
+        await batch.commit();
+      }
+
+      setNotice(
+        `${pendingVisible.length} pregunta(s) pendiente(s) volvieron a quedar ocultas.`,
+      );
+    } catch (error) {
+      setNotice(`No se pudo finalizar la prueba: ${getErrorMessage(error)}`);
     } finally {
       setSaving(false);
     }
@@ -1024,6 +1066,32 @@ export default function AdminFAQ() {
               }}
             >
               Habilitar todas para prueba
+            </button>
+            <button
+              type="button"
+              onClick={handleEndTest}
+              disabled={
+                saving ||
+                !preguntas.some(
+                  (pregunta) =>
+                    pregunta.revision === 'PENDIENTE' && pregunta.activo,
+                )
+              }
+              title="Oculta las preguntas pendientes habilitadas durante la prueba"
+              style={{
+                ...styles.secondaryButton,
+                margin: 0,
+                opacity:
+                  saving ||
+                  !preguntas.some(
+                    (pregunta) =>
+                      pregunta.revision === 'PENDIENTE' && pregunta.activo,
+                  )
+                    ? 0.55
+                    : 1,
+              }}
+            >
+              Finalizar prueba
             </button>
             <label style={styles.importButton}>
               {saving ? 'Procesando…' : 'Importar Word/CSV'}
