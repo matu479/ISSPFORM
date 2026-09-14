@@ -543,6 +543,38 @@ export default function AdminFAQ() {
     }
   }
 
+  async function handleDeleteAll() {
+    if (!preguntas.length) return;
+
+    const confirmation = prompt(
+      `Se eliminarán las ${preguntas.length} preguntas. Escribí BORRAR para confirmar.`,
+    );
+    if (confirmation !== 'BORRAR') return;
+
+    setSaving(true);
+    setNotice('');
+
+    try {
+      const { db } = getFirebaseServices();
+
+      for (let index = 0; index < preguntas.length; index += 400) {
+        const batch = writeBatch(db);
+        for (const pregunta of preguntas.slice(index, index + 400)) {
+          batch.delete(doc(db, FAQ_COLLECTION, pregunta.id));
+        }
+        await batch.commit();
+      }
+
+      setNotice(
+        'Se eliminaron todas las preguntas. Ya podés volver a importar el Word.',
+      );
+    } catch (error) {
+      setNotice(`No se pudieron eliminar: ${getErrorMessage(error)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function handleQuickUpdate(
     pregunta: PreguntaFAQ,
     changes: Partial<Pick<PreguntaFAQ, 'proyecto' | 'revision' | 'activo'>>,
@@ -918,6 +950,18 @@ export default function AdminFAQ() {
                 style={{ display: 'none' }}
               />
             </label>
+            <button
+              type="button"
+              onClick={handleDeleteAll}
+              disabled={saving || preguntas.length === 0}
+              style={{
+                ...styles.deleteButton,
+                padding: '12px 16px',
+                opacity: saving || preguntas.length === 0 ? 0.55 : 1,
+              }}
+            >
+              Vaciar preguntas
+            </button>
           </section>
 
           <p style={{ color: '#64748b' }}>
