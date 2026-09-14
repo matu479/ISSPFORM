@@ -1,6 +1,6 @@
-import { initializeApp } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
+import { getApp, getApps, initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
+import { getFirestore } from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -11,6 +11,29 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 
-export const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
-export const auth = getAuth(app);
+let cachedServices: ReturnType<typeof createServices> | undefined;
+
+function createServices() {
+  const missing = Object.entries(firebaseConfig)
+    .filter(([, value]) => !value)
+    .map(([key]) => key);
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Falta configurar Firebase: ${missing.join(', ')}. Revisá las variables NEXT_PUBLIC_FIREBASE_*.`,
+    );
+  }
+
+  const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+
+  return {
+    app,
+    db: getFirestore(app),
+    auth: getAuth(app),
+  };
+}
+
+export function getFirebaseServices() {
+  cachedServices ??= createServices();
+  return cachedServices;
+}

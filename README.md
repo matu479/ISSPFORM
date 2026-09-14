@@ -1,80 +1,104 @@
 # ISSP - Formulario de consultas
 
-Starter en Next.js para desplegar en Vercel.
+Aplicación Next.js con un formulario público y un panel para administrar
+preguntas frecuentes en Firebase/Firestore.
 
-## Incluye
+## Arquitectura
 
-- Selector de proyecto: NICE / Policía / Bomberos.
-- Datos del aspirante.
-- Etapas del proceso.
-- Preguntas específicas por etapa.
-- Consulta libre.
-- Validación de correo repetido.
-- Generación de número de ticket.
-- Respuestas automáticas para preguntas frecuentes.
-- Envío opcional a Formspree.
-- Diseño responsive para celular.
+```text
+/admin -> Firestore -> /formulario
+```
 
-## 1. Ejecutar localmente
+Firestore es la única fuente de preguntas y respuestas. El formulario usa una
+suscripción en tiempo real, por lo que crear, editar, activar, desactivar o
+eliminar una pregunta no requiere un nuevo deployment.
+
+## Configuración local
+
+1. Instalá dependencias:
 
 ```bash
 npm install
+```
+
+2. Copiá `.env.example` como `.env.local` y completá las seis variables
+   `NEXT_PUBLIC_FIREBASE_*`. Formspree es opcional.
+
+3. Iniciá el proyecto:
+
+```bash
 npm run dev
 ```
 
-Abrir:
+- Formulario: http://localhost:3000/formulario
+- Administración: http://localhost:3000/admin
 
-```text
-http://localhost:3000
+## Habilitar el acceso administrativo
+
+En Firebase Console:
+
+1. Abrí **Authentication > Sign-in method**.
+2. Habilitá **Correo electrónico/contraseña**.
+3. En **Authentication > Users**, creá únicamente los usuarios administradores.
+4. Publicá las reglas incluidas en `firestore.rules`.
+
+Si usás Firebase CLI:
+
+```bash
+firebase login
+firebase use TU_PROJECT_ID
+firebase deploy --only firestore:rules
 ```
 
-## 2. Conectar Formspree
+Las reglas permiten lectura pública de `preguntas-frecuentes` y reservan las
+escrituras para usuarios autenticados. El panel no ofrece registro público.
 
-1. Crear un formulario en Formspree.
-2. Copiar el endpoint, por ejemplo:
+## Variables en Vercel
 
-```text
-https://formspree.io/f/xxxxxxxx
-```
-
-3. Crear un archivo `.env.local` en la raíz:
+Configurá estas variables tanto para **Production** como para **Preview** si
+vas a desplegar ramas:
 
 ```env
-NEXT_PUBLIC_FORMSPREE_ENDPOINT=https://formspree.io/f/xxxxxxxx
+NEXT_PUBLIC_FIREBASE_API_KEY=
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
+NEXT_PUBLIC_FIREBASE_APP_ID=
+NEXT_PUBLIC_FORMSPREE_ENDPOINT=
 ```
 
-Si la variable no está configurada, la interfaz igualmente funciona en modo demo, pero no envía datos a Formspree.
+## Modelo de las preguntas
 
-## 3. Subir a GitHub
+Cada documento de la colección `preguntas-frecuentes` usa:
 
-Crear un repositorio nuevo y subir estos archivos.
+```ts
+{
+  proyecto: "NICE",
+  etapa: "Admisión",
+  pregunta: "¿Cuándo me corresponde presentarme?",
+  respuesta: "...",
+  orden: 1,
+  activo: true,
+  creado: Timestamp,
+  actualizado: Timestamp
+}
+```
 
-## 4. Deploy en Vercel
+Los documentos anteriores con `area`, `numero` y `estado` continúan
+leyéndose para facilitar la migración. Al editarlos desde `/admin`, se agregan
+los campos del modelo nuevo.
 
-1. New Project.
-2. Importar el repo de GitHub.
-3. Agregar la variable de entorno:
+## Importación
+
+El panel acepta archivos delimitados por barra vertical, punto y coma o coma,
+incluyendo campos entre comillas. El encabezado recomendado es:
 
 ```text
-NEXT_PUBLIC_FORMSPREE_ENDPOINT
+proyecto|etapa|orden|pregunta|respuesta|activo
 ```
 
-4. Deploy.
-
-## Personalización
-
-Las etapas y preguntas están en:
-
-```text
-app/page.js
-```
-
-Buscar:
-
-```js
-const STAGES = [...]
-const FAQS = {...}
-const AUTO_ANSWERS = {...}
-```
-
-Ahí se pueden modificar todas las opciones y respuestas sin tocar el resto del formulario.
+También acepta el formato anterior
+`numero|pregunta|respuesta|area`. Si faltan proyecto u orden, usa `NICE` y
+calcula el orden dentro de la etapa. Las filas incompletas o duplicadas se
+omiten.

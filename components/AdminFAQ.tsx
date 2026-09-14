@@ -1,597 +1,960 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { collection, getDocs, addDoc, updateDoc, deleteDoc, doc, query, where, onSnapshot } from 'firebase/firestore';
-import { db } from '@/lib/firebase'; // Tu import de Firebase
+import { FormEvent, useEffect, useMemo, useState } from 'react';
+import {
+  addDoc,
+  collection,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  serverTimestamp,
+  updateDoc,
+  writeBatch,
+} from 'firebase/firestore';
+import {
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut,
+  type User,
+} from 'firebase/auth';
+import { getFirebaseServices } from '@/lib/firebase';
+import {
+  comparePreguntas,
+  DEFAULT_PROJECTS,
+  DEFAULT_STAGES,
+  duplicateKey,
+  FAQ_COLLECTION,
+  normalizePregunta,
+  type PreguntaFAQ,
+} from '@/lib/faq';
 
-interface Pregunta {
-  id: string;
-  numero: number;
+type FormData = {
+  proyecto: string;
+  etapa: string;
   pregunta: string;
   respuesta: string;
-  area: string;
-  estado: string;
-  creado?: any;
+  orden: number;
+  activo: boolean;
+};
+
+const EMPTY_FORM: FormData = {
+  proyecto: 'NICE',
+  etapa: 'Admisión',
+  pregunta: '',
+  respuesta: '',
+  orden: 1,
+  activo: true,
+};
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function detectDelimiter(header: string) {
+  const candidates = ['|', ';', ','];
+  return candidates.sort(
+    (a, b) => header.split(b).length - header.split(a).length,
+  )[0];
+}
+
+function parseDelimited(text: string, delimiter: string) {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let quoted = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+
+    if (character === '"') {
+      if (quoted && text[index + 1] === '"') {
+        field += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (character === delimiter && !quoted) {
+      row.push(field.trim());
+      field = '';
+    } else if ((character === '\n' || character === '\r') && !quoted) {
+      if (character === '\r' && text[index + 1] === '\n') index += 1;
+      row.push(field.trim());
+      if (row.some(Boolean)) rows.push(row);
+      row = [];
+      field = '';
+    } else {
+      field += character;
+    }
+  }
+
+  row.push(field.trim());
+  if (row.some(Boolean)) rows.push(row);
+  return rows;
+}
+
+function normalizeHeader(value: string) {
+  return value
+    .replace(/^\uFEFF/, '')
+    .trim()
+    .toLocaleLowerCase('es')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
 }
 
 export default function AdminFAQ() {
-  const [preguntas, setPreguntas] = useState<Pregunta[]>([]);
-  const [areas, setAreas] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
-  
-  // Filtros
-  const [filtroArea, setFiltroArea] = useState('');
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [startupError, setStartupError] = useState('');
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loginBusy, setLoginBusy] = useState(false);
+
+  const [preguntas, setPreguntas] = useState<PreguntaFAQ[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [dataError, setDataError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const [filtroProyecto, setFiltroProyecto] = useState('');
+  const [filtroEtapa, setFiltroEtapa] = useState('');
   const [busqueda, setBusqueda] = useState('');
-  
-  // Formulario
+
   const [modo, setModo] = useState<'list' | 'nuevo' | 'editar'>('list');
   const [editandoId, setEditandoId] = useState<string | null>(null);
-  const [formData, setFormData] = useState({
-    numero: 0,
-    pregunta: '',
-    respuesta: '',
-    area: ''
-  });
+  const [formData, setFormData] = useState<FormData>(EMPTY_FORM);
+  const [saving, setSaving] = useState(false);
 
-  // Cargar preguntas en tiempo real
   useEffect(() => {
-    setLoading(true);
-    const unsubscribe = onSnapshot(
-      collection(db, 'preguntas-frecuentes'),
-      (snapshot) => {
-        const data = snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        } as Pregunta));
-        
-        // Ordenar por número
-        data.sort((a, b) => a.numero - b.numero);
-        setPreguntas(data);
-        
-        // Extraer áreas únicas
-        const areasUnicas = [...new Set(data.map(p => p.area))].sort();
-        setAreas(areasUnicas as string[]);
-        setLoading(false);
-      }
-    );
-    
-    return () => unsubscribe();
+    try {
+      const { auth } = getFirebaseServices();
+      return onAuthStateChanged(auth, (currentUser) => {
+        setUser(currentUser);
+        setAuthLoading(false);
+      });
+    } catch (error) {
+      setStartupError(getErrorMessage(error));
+      setAuthLoading(false);
+      return undefined;
+    }
   }, []);
 
-  // Filtrar preguntas
-  const preguntasFiltradas = preguntas.filter(p => {
-    const matchArea = !filtroArea || p.area === filtroArea;
-    const matchBusqueda = 
-      p.pregunta.toLowerCase().includes(busqueda.toLowerCase()) ||
-      p.respuesta.toLowerCase().includes(busqueda.toLowerCase());
-    return matchArea && matchBusqueda;
-  });
-
-  // Guardar nueva pregunta
-  const handleGuardarNueva = async () => {
-    if (!formData.pregunta.trim() || !formData.respuesta.trim() || !formData.area.trim()) {
-      alert('Completa todos los campos');
-      return;
+  useEffect(() => {
+    if (!user) {
+      setPreguntas([]);
+      return undefined;
     }
+
+    setLoading(true);
+    setDataError('');
 
     try {
-      const nuevoNumero = Math.max(...preguntas.map(p => p.numero), 0) + 1;
-      
-      await addDoc(collection(db, 'preguntas-frecuentes'), {
-        numero: nuevoNumero,
-        pregunta: formData.pregunta.trim(),
-        respuesta: formData.respuesta.trim(),
-        area: formData.area.trim(),
-        estado: 'REVISADA',
-        creado: new Date()
-      });
+      const { db } = getFirebaseServices();
+      return onSnapshot(
+        collection(db, FAQ_COLLECTION),
+        (snapshot) => {
+          const data = snapshot.docs
+            .map((item) =>
+              normalizePregunta(
+                item.id,
+                item.data() as Record<string, unknown>,
+              ),
+            )
+            .filter((item): item is PreguntaFAQ => item !== null)
+            .sort(comparePreguntas);
 
-      // Reset
-      setFormData({ numero: 0, pregunta: '', respuesta: '', area: '' });
-      setModo('list');
-      alert('✓ Pregunta agregada');
+          setPreguntas(data);
+          setLoading(false);
+        },
+        (error) => {
+          setDataError(getErrorMessage(error));
+          setLoading(false);
+        },
+      );
     } catch (error) {
-      alert('Error al guardar: ' + error);
+      setDataError(getErrorMessage(error));
+      setLoading(false);
+      return undefined;
     }
-  };
+  }, [user]);
 
-  // Actualizar pregunta
-  const handleGuardarEdicion = async () => {
-    if (!formData.pregunta.trim() || !formData.respuesta.trim() || !formData.area.trim()) {
-      alert('Completa todos los campos');
-      return;
-    }
+  const proyectos = useMemo(
+    () =>
+      [...new Set([...DEFAULT_PROJECTS, ...preguntas.map((p) => p.proyecto)])]
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b, 'es')),
+    [preguntas],
+  );
 
-    try {
-      await updateDoc(doc(db, 'preguntas-frecuentes', editandoId!), {
-        pregunta: formData.pregunta.trim(),
-        respuesta: formData.respuesta.trim(),
-        area: formData.area.trim()
-      });
+  const etapas = useMemo(
+    () =>
+      [...new Set([...DEFAULT_STAGES, ...preguntas.map((p) => p.etapa)])]
+        .filter(Boolean)
+        .sort((a, b) => {
+          const aIndex = DEFAULT_STAGES.indexOf(a);
+          const bIndex = DEFAULT_STAGES.indexOf(b);
+          if (aIndex >= 0 && bIndex >= 0) return aIndex - bIndex;
+          if (aIndex >= 0) return -1;
+          if (bIndex >= 0) return 1;
+          return a.localeCompare(b, 'es');
+        }),
+    [preguntas],
+  );
 
-      setModo('list');
-      setEditandoId(null);
-      setFormData({ numero: 0, pregunta: '', respuesta: '', area: '' });
-      alert('✓ Pregunta actualizada');
-    } catch (error) {
-      alert('Error al actualizar: ' + error);
-    }
-  };
+  const preguntasFiltradas = useMemo(() => {
+    const term = busqueda.trim().toLocaleLowerCase('es');
 
-  // Borrar pregunta
-  const handleBorrar = async (id: string, pregunta: string) => {
-    if (confirm(`¿Borrar: "${pregunta}"?`)) {
-      try {
-        await deleteDoc(doc(db, 'preguntas-frecuentes', id));
-        alert('✓ Pregunta borrada');
-      } catch (error) {
-        alert('Error al borrar: ' + error);
-      }
-    }
-  };
+    return preguntas.filter((pregunta) => {
+      const matchesProject =
+        !filtroProyecto || pregunta.proyecto === filtroProyecto;
+      const matchesStage = !filtroEtapa || pregunta.etapa === filtroEtapa;
+      const matchesSearch =
+        !term ||
+        pregunta.pregunta.toLocaleLowerCase('es').includes(term) ||
+        pregunta.respuesta.toLocaleLowerCase('es').includes(term);
 
-  // Editar pregunta
-  const handleEditar = (p: Pregunta) => {
-    setFormData({
-      numero: p.numero,
-      pregunta: p.pregunta,
-      respuesta: p.respuesta,
-      area: p.area
+      return matchesProject && matchesStage && matchesSearch;
     });
-    setEditandoId(p.id);
-    setModo('editar');
-  };
+  }, [busqueda, filtroEtapa, filtroProyecto, preguntas]);
 
-  // Importar CSV
-  const handleImportarCSV = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  function nextOrder(proyecto: string, etapa: string) {
+    return (
+      Math.max(
+        0,
+        ...preguntas
+          .filter((item) => item.proyecto === proyecto && item.etapa === etapa)
+          .map((item) => item.orden),
+      ) + 1
+    );
+  }
+
+  function startCreate() {
+    const proyecto = filtroProyecto || 'NICE';
+    const etapa = filtroEtapa || 'Admisión';
+    setFormData({
+      ...EMPTY_FORM,
+      proyecto,
+      etapa,
+      orden: nextOrder(proyecto, etapa),
+    });
+    setNotice('');
+    setModo('nuevo');
+  }
+
+  function startEdit(pregunta: PreguntaFAQ) {
+    setFormData({
+      proyecto: pregunta.proyecto,
+      etapa: pregunta.etapa,
+      pregunta: pregunta.pregunta,
+      respuesta: pregunta.respuesta,
+      orden: pregunta.orden,
+      activo: pregunta.activo,
+    });
+    setEditandoId(pregunta.id);
+    setNotice('');
+    setModo('editar');
+  }
+
+  function cancelEdit() {
+    setModo('list');
+    setEditandoId(null);
+    setFormData(EMPTY_FORM);
+  }
+
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoginBusy(true);
+    setLoginError('');
+
+    try {
+      const { auth } = getFirebaseServices();
+      await signInWithEmailAndPassword(
+        auth,
+        loginEmail.trim(),
+        loginPassword,
+      );
+      setLoginPassword('');
+    } catch {
+      setLoginError('No se pudo iniciar sesión. Revisá el correo y la contraseña.');
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const cleanData = {
+      proyecto: formData.proyecto.trim(),
+      etapa: formData.etapa.trim(),
+      pregunta: formData.pregunta.trim(),
+      respuesta: formData.respuesta.trim(),
+      orden: Number(formData.orden),
+      activo: formData.activo,
+    };
+
+    if (
+      !cleanData.proyecto ||
+      !cleanData.etapa ||
+      !cleanData.pregunta ||
+      !cleanData.respuesta ||
+      !Number.isFinite(cleanData.orden) ||
+      cleanData.orden < 0
+    ) {
+      setNotice('Completá todos los campos y usá un orden válido.');
+      return;
+    }
+
+    const duplicate = preguntas.find(
+      (item) =>
+        item.id !== editandoId &&
+        duplicateKey(item.proyecto, item.etapa, item.pregunta) ===
+          duplicateKey(
+            cleanData.proyecto,
+            cleanData.etapa,
+            cleanData.pregunta,
+          ),
+    );
+
+    if (duplicate) {
+      setNotice('Ya existe esa pregunta para el mismo proyecto y etapa.');
+      return;
+    }
+
+    setSaving(true);
+    setNotice('');
+
+    try {
+      const { db } = getFirebaseServices();
+
+      if (modo === 'editar' && editandoId) {
+        await updateDoc(doc(db, FAQ_COLLECTION, editandoId), {
+          ...cleanData,
+          actualizado: serverTimestamp(),
+        });
+        setNotice('Pregunta actualizada.');
+      } else {
+        await addDoc(collection(db, FAQ_COLLECTION), {
+          ...cleanData,
+          creado: serverTimestamp(),
+          actualizado: serverTimestamp(),
+        });
+        setNotice('Pregunta creada.');
+      }
+
+      cancelEdit();
+    } catch (error) {
+      setNotice(`No se pudo guardar: ${getErrorMessage(error)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete(pregunta: PreguntaFAQ) {
+    if (!confirm(`¿Eliminar “${pregunta.pregunta}”? Esta acción no se puede deshacer.`)) {
+      return;
+    }
+
+    try {
+      const { db } = getFirebaseServices();
+      await deleteDoc(doc(db, FAQ_COLLECTION, pregunta.id));
+      setNotice('Pregunta eliminada.');
+    } catch (error) {
+      setNotice(`No se pudo eliminar: ${getErrorMessage(error)}`);
+    }
+  }
+
+  async function handleImport(event: React.ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      try {
-        const csv = event.target?.result as string;
-        const lineas = csv.split('\n').filter(l => l.trim());
-        
-        // Saltar encabezado
-        const datos = lineas.slice(1);
-        let agregadas = 0;
+    setSaving(true);
+    setNotice('');
 
-        for (const linea of datos) {
-          const [numero, pregunta, respuesta, area] = linea.split('|').map(s => s.trim());
-          
-          if (pregunta && respuesta && area) {
-            await addDoc(collection(db, 'preguntas-frecuentes'), {
-              numero: parseInt(numero) || Math.max(...preguntas.map(p => p.numero), 0) + 1,
-              pregunta,
-              respuesta,
-              area,
-              estado: 'REVISADA',
-              creado: new Date()
-            });
-            agregadas++;
-          }
+    try {
+      if (file.size > 1_000_000) {
+        throw new Error('El archivo supera el límite de 1 MB.');
+      }
+
+      const text = await file.text();
+      const firstLine = text.split(/\r?\n/, 1)[0];
+      const rows = parseDelimited(text, detectDelimiter(firstLine));
+
+      if (rows.length < 2) {
+        throw new Error('El archivo no contiene filas para importar.');
+      }
+
+      const headers = rows[0].map(normalizeHeader);
+      const required = ['pregunta', 'respuesta'];
+      if (
+        !required.every((header) => headers.includes(header)) ||
+        (!headers.includes('etapa') && !headers.includes('area'))
+      ) {
+        throw new Error(
+          'Encabezado inválido. Usá: proyecto|etapa|orden|pregunta|respuesta|activo',
+        );
+      }
+
+      const existingKeys = new Set(
+        preguntas.map((item) =>
+          duplicateKey(item.proyecto, item.etapa, item.pregunta),
+        ),
+      );
+      const groupMaximums = new Map<string, number>();
+
+      for (const item of preguntas) {
+        const group = duplicateKey(item.proyecto, item.etapa, '');
+        groupMaximums.set(
+          group,
+          Math.max(groupMaximums.get(group) ?? 0, item.orden),
+        );
+      }
+
+      const records: Omit<PreguntaFAQ, 'id'>[] = [];
+      let skipped = 0;
+
+      for (const row of rows.slice(1)) {
+        const values = Object.fromEntries(
+          headers.map((header, index) => [header, row[index]?.trim() ?? '']),
+        );
+        const proyecto = values.proyecto || 'NICE';
+        const etapa = values.etapa || values.area;
+        const pregunta = values.pregunta;
+        const respuesta = values.respuesta;
+
+        if (!etapa || !pregunta || !respuesta) {
+          skipped += 1;
+          continue;
         }
 
-        alert(`✓ ${agregadas} preguntas importadas`);
-        (e.target as HTMLInputElement).value = '';
-      } catch (error) {
-        alert('Error en importación: ' + error);
+        const key = duplicateKey(proyecto, etapa, pregunta);
+        if (existingKeys.has(key)) {
+          skipped += 1;
+          continue;
+        }
+
+        const group = duplicateKey(proyecto, etapa, '');
+        const suppliedOrder = Number(values.orden || values.numero);
+        const orden =
+          Number.isFinite(suppliedOrder) && suppliedOrder >= 0
+            ? suppliedOrder
+            : (groupMaximums.get(group) ?? 0) + 1;
+        groupMaximums.set(
+          group,
+          Math.max(groupMaximums.get(group) ?? 0, orden),
+        );
+
+        const inactiveValues = ['false', '0', 'no', 'inactiva', 'inactivo'];
+        const activo = !inactiveValues.includes(
+          (values.activo || values.estado || 'true').toLocaleLowerCase('es'),
+        );
+
+        records.push({
+          proyecto,
+          etapa,
+          pregunta,
+          respuesta,
+          orden,
+          activo,
+        });
+        existingKeys.add(key);
       }
-    };
-    reader.readAsText(file);
-  };
+
+      const { db } = getFirebaseServices();
+      for (let index = 0; index < records.length; index += 400) {
+        const batch = writeBatch(db);
+        for (const record of records.slice(index, index + 400)) {
+          batch.set(doc(collection(db, FAQ_COLLECTION)), {
+            ...record,
+            creado: serverTimestamp(),
+            actualizado: serverTimestamp(),
+          });
+        }
+        await batch.commit();
+      }
+
+      setNotice(
+        `${records.length} pregunta(s) importada(s). ${skipped} fila(s) omitida(s) por estar incompletas o duplicadas.`,
+      );
+    } catch (error) {
+      setNotice(`No se pudo importar: ${getErrorMessage(error)}`);
+    } finally {
+      setSaving(false);
+      input.value = '';
+    }
+  }
+
+  if (authLoading) {
+    return <main style={styles.center}>Verificando acceso…</main>;
+  }
+
+  if (startupError) {
+    return (
+      <main style={styles.center}>
+        <div style={styles.errorCard}>
+          <h1>Configuración incompleta</h1>
+          <p>{startupError}</p>
+        </div>
+      </main>
+    );
+  }
+
+  if (!user) {
+    return (
+      <main style={styles.center}>
+        <form onSubmit={handleLogin} style={styles.loginCard}>
+          <img
+            src="/logo-horizontal.webp"
+            alt="ISSP"
+            style={{ width: '220px', maxWidth: '100%', marginBottom: 20 }}
+          />
+          <h1 style={{ marginTop: 0 }}>Acceso administrativo</h1>
+          <p style={{ color: '#64748b' }}>
+            Ingresá con el usuario administrador configurado en Firebase.
+          </p>
+          <label htmlFor="email">Correo electrónico</label>
+          <input
+            id="email"
+            type="email"
+            autoComplete="username"
+            value={loginEmail}
+            onChange={(event) => setLoginEmail(event.target.value)}
+            required
+          />
+          <label htmlFor="password">Contraseña</label>
+          <input
+            id="password"
+            type="password"
+            autoComplete="current-password"
+            value={loginPassword}
+            onChange={(event) => setLoginPassword(event.target.value)}
+            required
+          />
+          {loginError && <div style={styles.alert}>{loginError}</div>}
+          <button type="submit" style={styles.primaryButton} disabled={loginBusy}>
+            {loginBusy ? 'Ingresando…' : 'Ingresar'}
+          </button>
+        </form>
+      </main>
+    );
+  }
 
   return (
-    <div style={{ padding: '2rem', maxWidth: '1400px', margin: '0 auto', fontFamily: 'system-ui, sans-serif' }}>
-      {/* Header */}
-      <div style={{ marginBottom: '2rem' }}>
-        <h1 style={{ marginBottom: '0.5rem' }}>📋 Panel Admin - Preguntas FAQ ISSP</h1>
-        <p style={{ color: '#666', marginTop: 0 }}>Total: {preguntas.length} preguntas · {preguntasFiltradas.length} mostradas</p>
-      </div>
+    <main style={styles.page}>
+      <header style={styles.header}>
+        <div>
+          <h1 style={{ margin: 0 }}>Preguntas frecuentes</h1>
+          <p style={{ color: '#64748b', marginBottom: 0 }}>
+            {preguntas.length} preguntas guardadas en Firestore
+          </p>
+        </div>
+        <button
+          type="button"
+          style={styles.secondaryButton}
+          onClick={() => signOut(getFirebaseServices().auth)}
+        >
+          Cerrar sesión
+        </button>
+      </header>
 
-      {/* MODO: LISTA */}
-      {modo === 'list' && (
+      {notice && <div style={styles.notice}>{notice}</div>}
+      {dataError && <div style={styles.alert}>{dataError}</div>}
+
+      {modo === 'list' ? (
         <>
-          {/* Toolbar */}
-          <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
-            <button
-              onClick={() => {
-                setModo('nuevo');
-                setFormData({ numero: 0, pregunta: '', respuesta: '', area: '' });
-              }}
-              style={{
-                padding: '10px 16px',
-                backgroundColor: '#3b82f6',
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                fontWeight: 'bold'
-              }}
-            >
+          <section style={styles.toolbar}>
+            <button type="button" style={styles.primaryButton} onClick={startCreate}>
               + Nueva pregunta
             </button>
-
             <input
-              type="text"
-              placeholder="Buscar pregunta o respuesta..."
+              type="search"
+              placeholder="Buscar pregunta o respuesta…"
               value={busqueda}
-              onChange={(e) => setBusqueda(e.target.value)}
-              style={{
-                padding: '10px 12px',
-                border: '1px solid #ddd',
-                borderRadius: '6px',
-                flex: 1,
-                minWidth: '200px'
-              }}
+              onChange={(event) => setBusqueda(event.target.value)}
+              style={{ flex: '1 1 260px', margin: 0 }}
             />
-
             <select
-              value={filtroArea}
-              onChange={(e) => setFiltroArea(e.target.value)}
-              style={{
-                padding: '10px 12px',
-                border: '1px solid #ddd',
-                borderRadius: '6px',
-                minWidth: '180px'
-              }}
+              value={filtroProyecto}
+              onChange={(event) => setFiltroProyecto(event.target.value)}
+              style={{ flex: '0 1 180px', margin: 0 }}
             >
-              <option value="">Todas las áreas ({preguntas.length})</option>
-              {areas.map(area => {
-                const count = preguntas.filter(p => p.area === area).length;
-                return (
-                  <option key={area} value={area}>{area} ({count})</option>
-                );
-              })}
+              <option value="">Todos los proyectos</option>
+              {proyectos.map((proyecto) => (
+                <option key={proyecto} value={proyecto}>
+                  {proyecto}
+                </option>
+              ))}
             </select>
-
-            <label style={{
-              padding: '10px 16px',
-              backgroundColor: '#10b981',
-              color: 'white',
-              border: 'none',
-              borderRadius: '6px',
-              cursor: 'pointer',
-              fontWeight: 'bold'
-            }}>
-              📥 Importar CSV
+            <select
+              value={filtroEtapa}
+              onChange={(event) => setFiltroEtapa(event.target.value)}
+              style={{ flex: '0 1 220px', margin: 0 }}
+            >
+              <option value="">Todas las etapas</option>
+              {etapas.map((etapa) => (
+                <option key={etapa} value={etapa}>
+                  {etapa}
+                </option>
+              ))}
+            </select>
+            <label style={styles.importButton}>
+              {saving ? 'Procesando…' : 'Importar archivo'}
               <input
                 type="file"
-                accept=".csv"
-                onChange={handleImportarCSV}
+                accept=".csv,.txt,text/csv,text/plain"
+                disabled={saving}
+                onChange={handleImport}
                 style={{ display: 'none' }}
               />
             </label>
-          </div>
+          </section>
 
-          {/* Tabla */}
+          <p style={{ color: '#64748b' }}>
+            {preguntasFiltradas.length} resultado(s). Formato de importación:
+            proyecto|etapa|orden|pregunta|respuesta|activo
+          </p>
+
           {loading ? (
-            <p style={{ textAlign: 'center', color: '#999' }}>Cargando preguntas...</p>
-          ) : preguntasFiltradas.length === 0 ? (
-            <p style={{ textAlign: 'center', color: '#999', padding: '2rem' }}>No hay preguntas</p>
+            <p style={{ textAlign: 'center', padding: 40 }}>Cargando…</p>
           ) : (
-            <div style={{ overflowX: 'auto', border: '1px solid #e5e7eb', borderRadius: '8px' }}>
-              <table style={{
-                width: '100%',
-                borderCollapse: 'collapse',
-                backgroundColor: 'white'
-              }}>
+            <div style={styles.tableWrap}>
+              <table style={styles.table}>
                 <thead>
-                  <tr style={{ backgroundColor: '#f3f4f6', borderBottom: '2px solid #e5e7eb' }}>
-                    <th style={{ padding: '12px', textAlign: 'left', width: '60px' }}>N°</th>
-                    <th style={{ padding: '12px', textAlign: 'left' }}>Pregunta</th>
-                    <th style={{ padding: '12px', textAlign: 'left', width: '150px' }}>Área</th>
-                    <th style={{ padding: '12px', textAlign: 'center', width: '120px' }}>Acciones</th>
+                  <tr>
+                    <th style={styles.th}>Proyecto</th>
+                    <th style={styles.th}>Etapa / orden</th>
+                    <th style={styles.th}>Pregunta y respuesta</th>
+                    <th style={styles.th}>Estado</th>
+                    <th style={styles.th}>Acciones</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {preguntasFiltradas.map((p, idx) => (
-                    <tr
-                      key={p.id}
-                      style={{
-                        borderBottom: '1px solid #e5e7eb',
-                        backgroundColor: idx % 2 === 0 ? '#fff' : '#f9fafb'
-                      }}
-                    >
-                      <td style={{ padding: '12px', fontWeight: 'bold', color: '#3b82f6' }}>{p.numero}</td>
-                      <td style={{ padding: '12px' }}>
-                        <div style={{ fontWeight: '500', marginBottom: '4px' }}>{p.pregunta}</div>
-                        <div style={{ fontSize: '12px', color: '#666', maxHeight: '40px', overflow: 'hidden' }}>
-                          {p.respuesta.substring(0, 100)}...
-                        </div>
+                  {preguntasFiltradas.map((pregunta) => (
+                    <tr key={pregunta.id}>
+                      <td style={styles.td}>{pregunta.proyecto}</td>
+                      <td style={styles.td}>
+                        {pregunta.etapa}
+                        <br />
+                        <small>Orden {pregunta.orden}</small>
                       </td>
-                      <td style={{ padding: '12px' }}>
-                        <span style={{
-                          display: 'inline-block',
-                          padding: '4px 8px',
-                          backgroundColor: '#dbeafe',
-                          color: '#1e40af',
-                          borderRadius: '4px',
-                          fontSize: '12px',
-                          fontWeight: '500'
-                        }}>
-                          {p.area}
+                      <td style={styles.td}>
+                        <strong>{pregunta.pregunta}</strong>
+                        <p style={styles.preview}>{pregunta.respuesta}</p>
+                      </td>
+                      <td style={styles.td}>
+                        <span
+                          style={{
+                            ...styles.badge,
+                            background: pregunta.activo ? '#dcfce7' : '#fee2e2',
+                            color: pregunta.activo ? '#166534' : '#991b1b',
+                          }}
+                        >
+                          {pregunta.activo ? 'Activa' : 'Inactiva'}
                         </span>
                       </td>
-                      <td style={{ padding: '12px', textAlign: 'center' }}>
-                        <button
-                          onClick={() => handleEditar(p)}
-                          style={{
-                            marginRight: '8px',
-                            padding: '6px 10px',
-                            backgroundColor: '#f59e0b',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '4px',
-                            cursor: 'pointer',
-                            fontSize: '12px'
-                          }}
-                        >
-                          ✏ Editar
-                        </button>
-                        <button
-                          onClick={() => handleBorrar(p.id, p.pregunta)}
-                          style={{
-                            padding: '6px 10px',
-                            backgroundColor: '#ef4444',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '4px',
-                            cursor: 'pointer',
-                            fontSize: '12px'
-                          }}
-                        >
-                          ✗ Borrar
-                        </button>
+                      <td style={styles.td}>
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                          <button
+                            type="button"
+                            style={styles.editButton}
+                            onClick={() => startEdit(pregunta)}
+                          >
+                            Editar
+                          </button>
+                          <button
+                            type="button"
+                            style={styles.deleteButton}
+                            onClick={() => handleDelete(pregunta)}
+                          >
+                            Eliminar
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
+                  {!preguntasFiltradas.length && !loading && (
+                    <tr>
+                      <td colSpan={5} style={{ ...styles.td, textAlign: 'center' }}>
+                        No hay preguntas para mostrar.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
           )}
         </>
-      )}
+      ) : (
+        <form onSubmit={handleSave} style={styles.editor}>
+          <h2 style={{ marginTop: 0 }}>
+            {modo === 'nuevo' ? 'Nueva pregunta' : 'Editar pregunta'}
+          </h2>
 
-      {/* MODO: NUEVA PREGUNTA */}
-      {modo === 'nuevo' && (
-        <div style={{
-          backgroundColor: '#f9fafb',
-          padding: '2rem',
-          borderRadius: '8px',
-          border: '1px solid #e5e7eb',
-          maxWidth: '900px'
-        }}>
-          <h2>➕ Nueva Pregunta</h2>
-
-          <div style={{ marginBottom: '1.5rem' }}>
-            <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500' }}>
-              Pregunta
-            </label>
-            <input
-              type="text"
-              value={formData.pregunta}
-              onChange={(e) => setFormData({ ...formData, pregunta: e.target.value })}
-              style={{
-                width: '100%',
-                padding: '12px',
-                border: '1px solid #ddd',
-                borderRadius: '6px',
-                fontSize: '14px'
-              }}
-              placeholder="Ej: ¿Cómo me inscribo?"
-            />
-          </div>
-
-          <div style={{ marginBottom: '1.5rem' }}>
-            <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500' }}>
-              Respuesta
-            </label>
-            <textarea
-              value={formData.respuesta}
-              onChange={(e) => setFormData({ ...formData, respuesta: e.target.value })}
-              style={{
-                width: '100%',
-                padding: '12px',
-                border: '1px solid #ddd',
-                borderRadius: '6px',
-                minHeight: '150px',
-                fontSize: '14px',
-                fontFamily: 'system-ui, sans-serif'
-              }}
-              placeholder="Escribir la respuesta completa..."
-            />
-          </div>
-
-          <div style={{ marginBottom: '1.5rem' }}>
-            <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500' }}>
-              Área
-            </label>
-            <select
-              value={formData.area}
-              onChange={(e) => setFormData({ ...formData, area: e.target.value })}
-              style={{
-                width: '100%',
-                padding: '12px',
-                border: '1px solid #ddd',
-                borderRadius: '6px',
-                fontSize: '14px'
-              }}
-            >
-              <option value="">-- Seleccionar área --</option>
-              {areas.map(area => (
-                <option key={area} value={area}>{area}</option>
-              ))}
-              <option value="Nueva Área">+ Crear nueva área</option>
-            </select>
-            {formData.area === 'Nueva Área' && (
+          <div style={styles.grid}>
+            <div>
+              <label htmlFor="proyecto">Proyecto</label>
               <input
-                type="text"
-                placeholder="Nombre de la nueva área"
-                onChange={(e) => setFormData({ ...formData, area: e.target.value })}
-                style={{
-                  width: '100%',
-                  padding: '12px',
-                  border: '1px solid #ddd',
-                  borderRadius: '6px',
-                  marginTop: '8px'
-                }}
+                id="proyecto"
+                list="project-options"
+                value={formData.proyecto}
+                onChange={(event) =>
+                  setFormData({ ...formData, proyecto: event.target.value })
+                }
+                required
               />
-            )}
+              <datalist id="project-options">
+                {proyectos.map((proyecto) => (
+                  <option key={proyecto} value={proyecto} />
+                ))}
+              </datalist>
+            </div>
+            <div>
+              <label htmlFor="etapa">Etapa</label>
+              <input
+                id="etapa"
+                list="stage-options"
+                value={formData.etapa}
+                onChange={(event) =>
+                  setFormData({ ...formData, etapa: event.target.value })
+                }
+                required
+              />
+              <datalist id="stage-options">
+                {etapas.map((etapa) => (
+                  <option key={etapa} value={etapa} />
+                ))}
+              </datalist>
+            </div>
+            <div>
+              <label htmlFor="orden">Orden</label>
+              <input
+                id="orden"
+                type="number"
+                min="0"
+                step="1"
+                value={formData.orden}
+                onChange={(event) =>
+                  setFormData({
+                    ...formData,
+                    orden: Number(event.target.value),
+                  })
+                }
+                required
+              />
+            </div>
+            <div>
+              <label htmlFor="activo">Visibilidad</label>
+              <select
+                id="activo"
+                value={String(formData.activo)}
+                onChange={(event) =>
+                  setFormData({
+                    ...formData,
+                    activo: event.target.value === 'true',
+                  })
+                }
+              >
+                <option value="true">Activa: visible en el formulario</option>
+                <option value="false">Inactiva: oculta en el formulario</option>
+              </select>
+            </div>
           </div>
 
-          <div style={{ display: 'flex', gap: '1rem' }}>
-            <button
-              onClick={handleGuardarNueva}
-              style={{
-                padding: '12px 24px',
-                backgroundColor: '#10b981',
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                fontWeight: 'bold'
-              }}
-            >
-              ✓ Guardar pregunta
+          <label htmlFor="pregunta">Pregunta</label>
+          <input
+            id="pregunta"
+            value={formData.pregunta}
+            onChange={(event) =>
+              setFormData({ ...formData, pregunta: event.target.value })
+            }
+            maxLength={500}
+            required
+          />
+
+          <label htmlFor="respuesta">Respuesta automática</label>
+          <textarea
+            id="respuesta"
+            value={formData.respuesta}
+            onChange={(event) =>
+              setFormData({ ...formData, respuesta: event.target.value })
+            }
+            maxLength={5000}
+            rows={8}
+            required
+          />
+
+          {notice && <div style={styles.notice}>{notice}</div>}
+
+          <div style={{ display: 'flex', gap: 12 }}>
+            <button type="submit" style={styles.primaryButton} disabled={saving}>
+              {saving ? 'Guardando…' : 'Guardar'}
             </button>
-            <button
-              onClick={() => {
-                setModo('list');
-                setFormData({ numero: 0, pregunta: '', respuesta: '', area: '' });
-              }}
-              style={{
-                padding: '12px 24px',
-                backgroundColor: '#e5e7eb',
-                color: '#1f2937',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: 'pointer'
-              }}
-            >
+            <button type="button" style={styles.secondaryButton} onClick={cancelEdit}>
               Cancelar
             </button>
           </div>
-        </div>
+        </form>
       )}
-
-      {/* MODO: EDITAR */}
-      {modo === 'editar' && (
-        <div style={{
-          backgroundColor: '#f9fafb',
-          padding: '2rem',
-          borderRadius: '8px',
-          border: '1px solid #e5e7eb',
-          maxWidth: '900px'
-        }}>
-          <h2>✏ Editar Pregunta #{formData.numero}</h2>
-
-          <div style={{ marginBottom: '1.5rem' }}>
-            <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500' }}>
-              Pregunta
-            </label>
-            <input
-              type="text"
-              value={formData.pregunta}
-              onChange={(e) => setFormData({ ...formData, pregunta: e.target.value })}
-              style={{
-                width: '100%',
-                padding: '12px',
-                border: '1px solid #ddd',
-                borderRadius: '6px',
-                fontSize: '14px'
-              }}
-            />
-          </div>
-
-          <div style={{ marginBottom: '1.5rem' }}>
-            <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500' }}>
-              Respuesta
-            </label>
-            <textarea
-              value={formData.respuesta}
-              onChange={(e) => setFormData({ ...formData, respuesta: e.target.value })}
-              style={{
-                width: '100%',
-                padding: '12px',
-                border: '1px solid #ddd',
-                borderRadius: '6px',
-                minHeight: '150px',
-                fontSize: '14px',
-                fontFamily: 'system-ui, sans-serif'
-              }}
-            />
-          </div>
-
-          <div style={{ marginBottom: '1.5rem' }}>
-            <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500' }}>
-              Área
-            </label>
-            <select
-              value={formData.area}
-              onChange={(e) => setFormData({ ...formData, area: e.target.value })}
-              style={{
-                width: '100%',
-                padding: '12px',
-                border: '1px solid #ddd',
-                borderRadius: '6px',
-                fontSize: '14px'
-              }}
-            >
-              {areas.map(area => (
-                <option key={area} value={area}>{area}</option>
-              ))}
-            </select>
-          </div>
-
-          <div style={{ display: 'flex', gap: '1rem' }}>
-            <button
-              onClick={handleGuardarEdicion}
-              style={{
-                padding: '12px 24px',
-                backgroundColor: '#3b82f6',
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                fontWeight: 'bold'
-              }}
-            >
-              ✓ Guardar cambios
-            </button>
-            <button
-              onClick={() => {
-                setModo('list');
-                setEditandoId(null);
-                setFormData({ numero: 0, pregunta: '', respuesta: '', area: '' });
-              }}
-              style={{
-                padding: '12px 24px',
-                backgroundColor: '#e5e7eb',
-                color: '#1f2937',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: 'pointer'
-              }}
-            >
-              Cancelar
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Footer info */}
-      <div style={{
-        marginTop: '3rem',
-        padding: '1rem',
-        backgroundColor: '#f0f9ff',
-        borderRadius: '6px',
-        fontSize: '12px',
-        color: '#1e40af'
-      }}>
-        💡 <strong>Tips:</strong> Los cambios se guardan automáticamente en Firebase. La página pública se actualiza al instante. Importa CSV con formato: numero|pregunta|respuesta|area
-      </div>
-    </div>
+    </main>
   );
 }
+
+const styles: Record<string, React.CSSProperties> = {
+  page: {
+    maxWidth: 1400,
+    minHeight: '100vh',
+    margin: '0 auto',
+    padding: '32px 20px',
+    fontFamily: 'system-ui, sans-serif',
+  },
+  center: {
+    minHeight: '100vh',
+    display: 'grid',
+    placeItems: 'center',
+    padding: 20,
+    fontFamily: 'system-ui, sans-serif',
+  },
+  header: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 20,
+    marginBottom: 24,
+  },
+  loginCard: {
+    width: 'min(440px, 100%)',
+    padding: 32,
+    background: '#fff',
+    border: '1px solid #e2e8f0',
+    borderRadius: 12,
+    boxShadow: '0 10px 30px rgba(15, 23, 42, .08)',
+  },
+  errorCard: {
+    width: 'min(640px, 100%)',
+    padding: 32,
+    background: '#fff',
+    border: '1px solid #fecaca',
+    borderRadius: 12,
+  },
+  toolbar: {
+    display: 'flex',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 12,
+    padding: 16,
+    background: '#fff',
+    border: '1px solid #e2e8f0',
+    borderRadius: 10,
+  },
+  primaryButton: {
+    minHeight: 46,
+    padding: '10px 18px',
+    background: '#003d7a',
+    color: '#fff',
+    border: 0,
+    borderRadius: 7,
+    cursor: 'pointer',
+    fontWeight: 700,
+  },
+  secondaryButton: {
+    minHeight: 46,
+    padding: '10px 18px',
+    background: '#fff',
+    color: '#003d7a',
+    border: '1px solid #003d7a',
+    borderRadius: 7,
+    cursor: 'pointer',
+    fontWeight: 700,
+  },
+  importButton: {
+    minHeight: 46,
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '10px 18px',
+    margin: 0,
+    background: '#047857',
+    color: '#fff',
+    borderRadius: 7,
+    cursor: 'pointer',
+    fontWeight: 700,
+  },
+  tableWrap: {
+    overflowX: 'auto',
+    background: '#fff',
+    border: '1px solid #e2e8f0',
+    borderRadius: 10,
+  },
+  table: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    minWidth: 900,
+  },
+  th: {
+    padding: 12,
+    textAlign: 'left',
+    background: '#f1f5f9',
+    borderBottom: '1px solid #cbd5e1',
+  },
+  td: {
+    padding: 12,
+    verticalAlign: 'top',
+    borderBottom: '1px solid #e2e8f0',
+  },
+  preview: {
+    maxWidth: 620,
+    margin: '6px 0 0',
+    color: '#64748b',
+    fontSize: 13,
+    lineHeight: 1.4,
+  },
+  badge: {
+    display: 'inline-block',
+    padding: '4px 8px',
+    borderRadius: 999,
+    fontSize: 12,
+    fontWeight: 700,
+  },
+  editButton: {
+    padding: '7px 10px',
+    background: '#d97706',
+    color: '#fff',
+    border: 0,
+    borderRadius: 5,
+    cursor: 'pointer',
+  },
+  deleteButton: {
+    padding: '7px 10px',
+    background: '#dc2626',
+    color: '#fff',
+    border: 0,
+    borderRadius: 5,
+    cursor: 'pointer',
+  },
+  editor: {
+    maxWidth: 900,
+    padding: 24,
+    background: '#fff',
+    border: '1px solid #e2e8f0',
+    borderRadius: 10,
+  },
+  grid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+    gap: 16,
+  },
+  notice: {
+    marginBottom: 18,
+    padding: 12,
+    background: '#eff6ff',
+    color: '#1e3a8a',
+    border: '1px solid #bfdbfe',
+    borderRadius: 7,
+  },
+  alert: {
+    marginBottom: 18,
+    padding: 12,
+    background: '#fef2f2',
+    color: '#991b1b',
+    border: '1px solid #fecaca',
+    borderRadius: 7,
+  },
+};
