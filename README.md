@@ -10,25 +10,15 @@ preguntas frecuentes en Firebase/Firestore.
 ```
 
 Firestore es la única fuente de preguntas y respuestas. El formulario usa una
-suscripción en tiempo real, por lo que crear, editar, activar, desactivar o
-eliminar una pregunta no requiere un nuevo deployment.
+suscripción en tiempo real, por lo que los cambios no requieren un nuevo
+deployment.
 
 ## Configuración local
 
-1. Instalá dependencias:
-
-```bash
-npm install
-```
-
-2. Copiá `.env.example` como `.env.local` y completá las seis variables
-   `NEXT_PUBLIC_FIREBASE_*`. Formspree es opcional.
-
-3. Iniciá el proyecto:
-
-```bash
-npm run dev
-```
+1. Ejecutá `npm install`.
+2. Copiá `.env.example` como `.env.local` y completá las variables
+   `NEXT_PUBLIC_FIREBASE_*`.
+3. Ejecutá `npm run dev`.
 
 - Formulario: http://localhost:3000/formulario
 - Administración: http://localhost:3000/admin
@@ -40,7 +30,8 @@ En Firebase Console:
 1. Abrí **Authentication > Sign-in method**.
 2. Habilitá **Correo electrónico/contraseña**.
 3. En **Authentication > Users**, creá únicamente los usuarios administradores.
-4. Copiá el UID de cada administrador y reemplazá `REEMPLAZAR_CON_UID_ADMIN` en `firestore.rules`.
+4. Copiá el UID de cada administrador y reemplazá
+   `REEMPLAZAR_CON_UID_ADMIN` en `firestore.rules`.
 5. Publicá las reglas.
 
 Si usás Firebase CLI:
@@ -52,8 +43,7 @@ firebase deploy --only firestore:rules
 ```
 
 Las reglas permiten lectura pública de `preguntas-frecuentes` y reservan las
-escrituras para los UID incluidos en `isAdmin()`. Para autorizar más de un
-administrador, agregá sus UID separados por comas dentro de la lista.
+escrituras para los UID incluidos en `isAdmin()`.
 
 ## Variables en Vercel
 
@@ -76,31 +66,47 @@ Cada documento de la colección `preguntas-frecuentes` usa:
 
 ```ts
 {
-  proyecto: "NICE",
+  proyecto: "NICE", // proceso al que pertenece
   etapa: "Admisión",
   pregunta: "¿Cuándo me corresponde presentarme?",
   respuesta: "...",
   orden: 1,
+  revision: "REVISADA", // o "PENDIENTE"
   activo: true,
   creado: Timestamp,
   actualizado: Timestamp
 }
 ```
 
-Los documentos anteriores con `area`, `numero` y `estado` continúan
-leyéndose para facilitar la migración. Al editarlos desde `/admin`, se agregan
-los campos del modelo nuevo.
+El campo `orden` es la posición de la pregunta dentro del mismo proceso y
+etapa. El formulario público solo muestra preguntas activas, revisadas y con un
+proceso asignado. Los documentos anteriores con `area`, `numero` y
+`estado` continúan leyéndose para facilitar la migración.
 
-## Importación
+## Importación del Word
 
-El panel acepta archivos delimitados por barra vertical, punto y coma o coma,
-incluyendo campos entre comillas. El encabezado recomendado es:
+El panel acepta directamente archivos `.docx` de hasta 8 MB. Busca tablas que
+tengan encabezados de pregunta/consulta y respuesta; también reconoce columnas
+opcionales de proceso/proyecto, etapa/área/sección, número/orden y
+estado/revisión.
+
+Si el Word solo contiene pregunta y respuesta, cada fila se importa como:
+
+- proceso: `Sin asignar`;
+- etapa: `Sin etapa`;
+- revisión: `PENDIENTE`;
+- visibilidad: oculta.
+
+Después de importar, el administrador puede filtrar las preguntas y asignar el
+proceso y el estado de revisión directamente desde la tabla. Al marcar una
+pregunta como revisada con un proceso asignado, queda visible en el formulario.
+
+También se aceptan archivos CSV o TXT delimitados por barra vertical, punto y
+coma o coma. Un encabezado completo posible es:
 
 ```text
-proyecto|etapa|orden|pregunta|respuesta|activo
+proceso|etapa|orden|pregunta|respuesta|revision|activo
 ```
 
-También acepta el formato anterior
-`numero|pregunta|respuesta|area`. Si faltan proyecto u orden, usa `NICE` y
-calcula el orden dentro de la etapa. Las filas incompletas o duplicadas se
-omiten.
+Las filas incompletas o duplicadas se omiten. Para cambios posteriores a la
+carga inicial se puede crear, editar o eliminar cada pregunta manualmente.

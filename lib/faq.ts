@@ -1,5 +1,7 @@
 export const FAQ_COLLECTION = 'preguntas-frecuentes';
 
+export const UNASSIGNED_PROCESS = 'Sin asignar';
+
 export const DEFAULT_PROJECTS = ['NICE', 'Policía', 'Bomberos'];
 
 export const DEFAULT_STAGES = [
@@ -19,6 +21,8 @@ export const DEFAULT_STAGES = [
   'Cierre',
 ];
 
+export type EstadoRevision = 'PENDIENTE' | 'REVISADA';
+
 export interface PreguntaFAQ {
   id: string;
   proyecto: string;
@@ -27,6 +31,7 @@ export interface PreguntaFAQ {
   respuesta: string;
   orden: number;
   activo: boolean;
+  revision: EstadoRevision;
 }
 
 function cleanString(value: unknown) {
@@ -37,20 +42,43 @@ export function normalizePregunta(
   id: string,
   raw: Record<string, unknown>,
 ): PreguntaFAQ | null {
-  const proyecto = cleanString(raw.proyecto) || 'NICE';
-  const etapa = cleanString(raw.etapa) || cleanString(raw.area);
+  const proyecto =
+    cleanString(raw.proyecto) ||
+    cleanString(raw.proceso) ||
+    UNASSIGNED_PROCESS;
+  const etapa =
+    cleanString(raw.etapa) ||
+    cleanString(raw.area) ||
+    'Sin etapa';
   const pregunta = cleanString(raw.pregunta);
   const respuesta = cleanString(raw.respuesta);
   const parsedOrder = Number(raw.orden ?? raw.numero ?? 0);
   const orden = Number.isFinite(parsedOrder) ? parsedOrder : 0;
+  const legacyStatus = cleanString(raw.estado).toUpperCase();
+  const rawRevision = cleanString(raw.revision).toUpperCase();
+  const revision: EstadoRevision =
+    rawRevision === 'REVISADA' ||
+    legacyStatus === 'REVISADA' ||
+    legacyStatus === 'REVISADO'
+      ? 'REVISADA'
+      : 'PENDIENTE';
   const activo =
     typeof raw.activo === 'boolean'
       ? raw.activo
-      : cleanString(raw.estado).toUpperCase() !== 'INACTIVA';
+      : revision === 'REVISADA';
 
-  if (!etapa || !pregunta || !respuesta) return null;
+  if (!pregunta || !respuesta) return null;
 
-  return { id, proyecto, etapa, pregunta, respuesta, orden, activo };
+  return {
+    id,
+    proyecto,
+    etapa,
+    pregunta,
+    respuesta,
+    orden,
+    activo,
+    revision,
+  };
 }
 
 export function comparePreguntas(a: PreguntaFAQ, b: PreguntaFAQ) {

@@ -82,34 +82,44 @@ export default function Home() {
     }
   }, []);
 
+  const publicFaqs = useMemo(
+    () =>
+      faqs.filter(
+        (item) =>
+          item.activo &&
+          item.revision === "REVISADA" &&
+          item.proyecto !== "Sin asignar"
+      ),
+    [faqs]
+  );
+
   const projects = useMemo(
     () =>
-      [...new Set([...DEFAULT_PROJECTS, ...faqs.map((item) => item.proyecto)])]
+      [...new Set([...DEFAULT_PROJECTS, ...publicFaqs.map((item) => item.proyecto)])]
         .filter(Boolean),
-    [faqs]
+    [publicFaqs]
   );
 
   const stages = useMemo(
     () =>
       [...new Set(
-        faqs
-          .filter((item) => item.activo && item.proyecto === project)
+        publicFaqs
+          .filter((item) => item.proyecto === project)
           .map((item) => item.etapa)
       )].sort(stageComparator),
-    [faqs, project]
+    [publicFaqs, project]
   );
 
   const questions = useMemo(
     () =>
-      faqs
+      publicFaqs
         .filter(
           (item) =>
-            item.activo &&
             item.proyecto === project &&
             item.etapa === stage
         )
         .sort((a, b) => a.orden - b.orden || a.pregunta.localeCompare(b.pregunta, "es")),
-    [faqs, project, stage]
+    [publicFaqs, project, stage]
   );
 
   const selectedQuestion = useMemo(

@@ -19,7 +19,8 @@ service cloud.firestore {
           'pregunta',
           'respuesta',
           'orden',
-          'activo'
+          'activo',
+          'revision'
         ])
         && request.resource.data.proyecto is string
         && request.resource.data.proyecto.size() > 0
@@ -35,7 +36,8 @@ service cloud.firestore {
         && request.resource.data.respuesta.size() <= 5000
         && request.resource.data.orden is number
         && request.resource.data.orden >= 0
-        && request.resource.data.activo is bool;
+        && request.resource.data.activo is bool
+        && request.resource.data.revision in ['PENDIENTE', 'REVISADA'];
 
       allow delete: if isAdmin();
     }

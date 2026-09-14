@@ -25,6 +25,8 @@ import {
   duplicateKey,
   FAQ_COLLECTION,
   normalizePregunta,
+  UNASSIGNED_PROCESS,
+  type EstadoRevision,
   type PreguntaFAQ,
 } from '@/lib/faq';
 
@@ -35,6 +37,7 @@ type FormData = {
   respuesta: string;
   orden: number;
   activo: boolean;
+  revision: EstadoRevision;
 };
 
 const EMPTY_FORM: FormData = {
@@ -43,7 +46,8 @@ const EMPTY_FORM: FormData = {
   pregunta: '',
   respuesta: '',
   orden: 1,
-  activo: true,
+  activo: false,
+  revision: 'PENDIENTE',
 };
 
 function getErrorMessage(error: unknown) {
@@ -101,6 +105,34 @@ function normalizeHeader(value: string) {
     .replace(/[\u0300-\u036f]/g, '');
 }
 
+function canonicalHeader(value: string) {
+  const normalized = normalizeHeader(value);
+
+  if (normalized.includes('pregunta') || normalized.includes('consulta')) {
+    return 'pregunta';
+  }
+  if (normalized.includes('respuesta')) return 'respuesta';
+  if (normalized.includes('proceso') || normalized.includes('proyecto')) {
+    return 'proyecto';
+  }
+  if (
+    normalized.includes('etapa') ||
+    normalized.includes('area') ||
+    normalized.includes('seccion')
+  ) {
+    return 'etapa';
+  }
+  if (normalized.includes('revision') || normalized.includes('estado')) {
+    return 'estado';
+  }
+  if (['n', 'n°', 'nº', 'nro', 'numero'].includes(normalized)) {
+    return 'numero';
+  }
+  if (normalized === 'orden') return 'orden';
+
+  return normalized;
+}
+
 export default function AdminFAQ() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -117,6 +149,7 @@ export default function AdminFAQ() {
 
   const [filtroProyecto, setFiltroProyecto] = useState('');
   const [filtroEtapa, setFiltroEtapa] = useState('');
+  const [filtroRevision, setFiltroRevision] = useState('');
   const [busqueda, setBusqueda] = useState('');
 
   const [modo, setModo] = useState<'list' | 'nuevo' | 'editar'>('list');
@@ -207,14 +240,22 @@ export default function AdminFAQ() {
       const matchesProject =
         !filtroProyecto || pregunta.proyecto === filtroProyecto;
       const matchesStage = !filtroEtapa || pregunta.etapa === filtroEtapa;
+      const matchesRevision =
+        !filtroRevision || pregunta.revision === filtroRevision;
       const matchesSearch =
         !term ||
         pregunta.pregunta.toLocaleLowerCase('es').includes(term) ||
         pregunta.respuesta.toLocaleLowerCase('es').includes(term);
 
-      return matchesProject && matchesStage && matchesSearch;
+      return matchesProject && matchesStage && matchesRevision && matchesSearch;
     });
-  }, [busqueda, filtroEtapa, filtroProyecto, preguntas]);
+  }, [
+    busqueda,
+    filtroEtapa,
+    filtroProyecto,
+    filtroRevision,
+    preguntas,
+  ]);
 
   function nextOrder(proyecto: string, etapa: string) {
     return (
@@ -248,6 +289,7 @@ export default function AdminFAQ() {
       respuesta: pregunta.respuesta,
       orden: pregunta.orden,
       activo: pregunta.activo,
+      revision: pregunta.revision,
     });
     setEditandoId(pregunta.id);
     setNotice('');
@@ -288,7 +330,12 @@ export default function AdminFAQ() {
       pregunta: formData.pregunta.trim(),
       respuesta: formData.respuesta.trim(),
       orden: Number(formData.orden),
-      activo: formData.activo,
+      activo:
+        formData.revision === 'REVISADA' &&
+        formData.proyecto.trim() !== UNASSIGNED_PROCESS
+          ? formData.activo
+          : false,
+      revision: formData.revision,
     };
 
     if (
@@ -315,7 +362,7 @@ export default function AdminFAQ() {
     );
 
     if (duplicate) {
-      setNotice('Ya existe esa pregunta para el mismo proyecto y etapa.');
+      setNotice('Ya existe esa pregunta para el mismo proceso y etapa.');
       return;
     }
 
@@ -362,6 +409,23 @@ export default function AdminFAQ() {
     }
   }
 
+  async function handleQuickUpdate(
+    pregunta: PreguntaFAQ,
+    changes: Partial<Pick<PreguntaFAQ, 'proyecto' | 'revision' | 'activo'>>,
+  ) {
+    setNotice('');
+
+    try {
+      const { db } = getFirebaseServices();
+      await updateDoc(doc(db, FAQ_COLLECTION, pregunta.id), {
+        ...changes,
+        actualizado: serverTimestamp(),
+      });
+    } catch (error) {
+      setNotice(`No se pudo actualizar: ${getErrorMessage(error)}`);
+    }
+  }
+
   async function handleImport(event: React.ChangeEvent<HTMLInputElement>) {
     const input = event.currentTarget;
     const file = input.files?.[0];
@@ -371,26 +435,63 @@ export default function AdminFAQ() {
     setNotice('');
 
     try {
-      if (file.size > 1_000_000) {
-        throw new Error('El archivo supera el límite de 1 MB.');
+      let tables: string[][][];
+
+      if (file.name.toLocaleLowerCase('es').endsWith('.docx')) {
+        if (file.size > 8_000_000) {
+          throw new Error('El Word supera el límite de 8 MB.');
+        }
+
+        const formData = new FormData();
+        formData.append('file', file);
+        const response = await fetch('/api/import-docx', {
+          method: 'POST',
+          body: formData,
+        });
+        const payload = await response.json();
+
+        if (!response.ok) {
+          throw new Error(payload.error || 'No se pudo leer el Word.');
+        }
+
+        tables = payload.tables;
+      } else {
+        if (file.size > 1_000_000) {
+          throw new Error('El archivo supera el límite de 1 MB.');
+        }
+
+        const text = await file.text();
+        const firstLine = text.split(/\r?\n/, 1)[0];
+        tables = [parseDelimited(text, detectDelimiter(firstLine))];
       }
 
-      const text = await file.text();
-      const firstLine = text.split(/\r?\n/, 1)[0];
-      const rows = parseDelimited(text, detectDelimiter(firstLine));
+      const parsedTables = tables
+        .map((rows) => {
+          const headerIndex = rows.findIndex((row) => {
+            const normalized = row.map(canonicalHeader);
+            return (
+              normalized.includes('pregunta') &&
+              normalized.includes('respuesta')
+            );
+          });
 
-      if (rows.length < 2) {
-        throw new Error('El archivo no contiene filas para importar.');
-      }
+          if (headerIndex < 0) return null;
 
-      const headers = rows[0].map(normalizeHeader);
-      const required = ['pregunta', 'respuesta'];
-      if (
-        !required.every((header) => headers.includes(header)) ||
-        (!headers.includes('etapa') && !headers.includes('area'))
-      ) {
+          return {
+            headers: rows[headerIndex].map(canonicalHeader),
+            rows: rows.slice(headerIndex + 1),
+          };
+        })
+        .filter(
+          (
+            table,
+          ): table is { headers: string[]; rows: string[][] } =>
+            table !== null,
+        );
+
+      if (parsedTables.length === 0) {
         throw new Error(
-          'Encabezado inválido. Usá: proyecto|etapa|orden|pregunta|respuesta|activo',
+          'No encontré una tabla con las columnas Pregunta y Respuesta.',
         );
       }
 
@@ -412,51 +513,95 @@ export default function AdminFAQ() {
       const records: Omit<PreguntaFAQ, 'id'>[] = [];
       let skipped = 0;
 
-      for (const row of rows.slice(1)) {
-        const values = Object.fromEntries(
-          headers.map((header, index) => [header, row[index]?.trim() ?? '']),
-        );
-        const proyecto = values.proyecto || 'NICE';
-        const etapa = values.etapa || values.area;
-        const pregunta = values.pregunta;
-        const respuesta = values.respuesta;
+      for (const table of parsedTables) {
+        for (const row of table.rows) {
+          const values = Object.fromEntries(
+            table.headers.map((header, index) => [
+              header,
+              row[index]?.trim() ?? '',
+            ]),
+          );
+          const proyecto =
+            values.proyecto ||
+            values.proceso ||
+            UNASSIGNED_PROCESS;
+          const etapa =
+            values.etapa ||
+            values.area ||
+            values.seccion ||
+            'Sin etapa';
+          const pregunta = values.pregunta;
+          const respuesta = values.respuesta;
 
-        if (!etapa || !pregunta || !respuesta) {
-          skipped += 1;
-          continue;
+          if (!pregunta || !respuesta) {
+            skipped += 1;
+            continue;
+          }
+
+          const key = duplicateKey(proyecto, etapa, pregunta);
+          if (existingKeys.has(key)) {
+            skipped += 1;
+            continue;
+          }
+
+          const group = duplicateKey(proyecto, etapa, '');
+          const suppliedOrder = Number(
+            values.orden ||
+            values.numero ||
+            values['n°'] ||
+            values['nº'] ||
+            values.nro,
+          );
+          const orden =
+            Number.isFinite(suppliedOrder) && suppliedOrder >= 0
+              ? suppliedOrder
+              : (groupMaximums.get(group) ?? 0) + 1;
+          groupMaximums.set(
+            group,
+            Math.max(groupMaximums.get(group) ?? 0, orden),
+          );
+
+          const rawStatus = (
+            values.revision ||
+            values.estado ||
+            values.revisada ||
+            ''
+          ).toLocaleLowerCase('es');
+          const revision: EstadoRevision =
+            rawStatus.includes('revisad') ||
+            rawStatus.includes('aprobad') ||
+            ['si', 'sí', 'true', '1'].includes(rawStatus)
+              ? 'REVISADA'
+              : 'PENDIENTE';
+
+          const inactiveValues = [
+            'false',
+            '0',
+            'no',
+            'inactiva',
+            'inactivo',
+          ];
+          const explicitActive = values.activo
+            ? !inactiveValues.includes(
+                values.activo.toLocaleLowerCase('es'),
+              )
+            : true;
+          const activo =
+            explicitActive &&
+            revision === 'REVISADA' &&
+            proyecto !== UNASSIGNED_PROCESS;
+
+          records.push({
+            proyecto,
+            etapa,
+            pregunta,
+            respuesta,
+            orden,
+            activo,
+            revision,
+          });
+          existingKeys.add(key);
         }
-
-        const key = duplicateKey(proyecto, etapa, pregunta);
-        if (existingKeys.has(key)) {
-          skipped += 1;
-          continue;
-        }
-
-        const group = duplicateKey(proyecto, etapa, '');
-        const suppliedOrder = Number(values.orden || values.numero);
-        const orden =
-          Number.isFinite(suppliedOrder) && suppliedOrder >= 0
-            ? suppliedOrder
-            : (groupMaximums.get(group) ?? 0) + 1;
-        groupMaximums.set(
-          group,
-          Math.max(groupMaximums.get(group) ?? 0, orden),
-        );
-
-        const inactiveValues = ['false', '0', 'no', 'inactiva', 'inactivo'];
-        const activo = !inactiveValues.includes(
-          (values.activo || values.estado || 'true').toLocaleLowerCase('es'),
-        );
-
-        records.push({
-          proyecto,
-          etapa,
-          pregunta,
-          respuesta,
-          orden,
-          activo,
-        });
-        existingKeys.add(key);
       }
 
       const { db } = getFirebaseServices();
@@ -577,7 +722,7 @@ export default function AdminFAQ() {
               onChange={(event) => setFiltroProyecto(event.target.value)}
               style={{ flex: '0 1 180px', margin: 0 }}
             >
-              <option value="">Todos los proyectos</option>
+              <option value="">Todos los procesos</option>
               {proyectos.map((proyecto) => (
                 <option key={proyecto} value={proyecto}>
                   {proyecto}
@@ -596,11 +741,20 @@ export default function AdminFAQ() {
                 </option>
               ))}
             </select>
+            <select
+              value={filtroRevision}
+              onChange={(event) => setFiltroRevision(event.target.value)}
+              style={{ flex: '0 1 190px', margin: 0 }}
+            >
+              <option value="">Todos los estados</option>
+              <option value="PENDIENTE">Pendientes de revisión</option>
+              <option value="REVISADA">Revisadas</option>
+            </select>
             <label style={styles.importButton}>
-              {saving ? 'Procesando…' : 'Importar archivo'}
+              {saving ? 'Procesando…' : 'Importar Word/CSV'}
               <input
                 type="file"
-                accept=".csv,.txt,text/csv,text/plain"
+                accept=".docx,.csv,.txt,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/csv,text/plain"
                 disabled={saving}
                 onChange={handleImport}
                 style={{ display: 'none' }}
@@ -609,8 +763,9 @@ export default function AdminFAQ() {
           </section>
 
           <p style={{ color: '#64748b' }}>
-            {preguntasFiltradas.length} resultado(s). Formato de importación:
-            proyecto|etapa|orden|pregunta|respuesta|activo
+            {preguntasFiltradas.length} resultado(s). Podés subir el Word original
+            o un archivo con las columnas Pregunta y Respuesta. Las preguntas sin
+            proceso quedan como “Sin asignar” y pendientes de revisión.
           </p>
 
           {loading ? (
@@ -620,17 +775,45 @@ export default function AdminFAQ() {
               <table style={styles.table}>
                 <thead>
                   <tr>
-                    <th style={styles.th}>Proyecto</th>
+                    <th style={styles.th}>Proceso</th>
                     <th style={styles.th}>Etapa / orden</th>
                     <th style={styles.th}>Pregunta y respuesta</th>
-                    <th style={styles.th}>Estado</th>
+                    <th style={styles.th}>Revisión</th>
+                    <th style={styles.th}>Visibilidad</th>
                     <th style={styles.th}>Acciones</th>
                   </tr>
                 </thead>
                 <tbody>
                   {preguntasFiltradas.map((pregunta) => (
                     <tr key={pregunta.id}>
-                      <td style={styles.td}>{pregunta.proyecto}</td>
+                      <td style={styles.td}>
+                        <select
+                          aria-label={`Proceso de ${pregunta.pregunta}`}
+                          value={pregunta.proyecto}
+                          onChange={(event) => {
+                            const proyecto = event.target.value;
+                            handleQuickUpdate(pregunta, {
+                              proyecto,
+                              activo:
+                                proyecto === UNASSIGNED_PROCESS
+                                  ? false
+                                  : pregunta.revision === 'REVISADA',
+                            });
+                          }}
+                          style={{ minWidth: 150, margin: 0 }}
+                        >
+                          {[UNASSIGNED_PROCESS, ...proyectos]
+                            .filter(
+                              (value, index, items) =>
+                                items.indexOf(value) === index,
+                            )
+                            .map((proyecto) => (
+                              <option key={proyecto} value={proyecto}>
+                                {proyecto}
+                              </option>
+                            ))}
+                        </select>
+                      </td>
                       <td style={styles.td}>
                         {pregunta.etapa}
                         <br />
@@ -641,6 +824,26 @@ export default function AdminFAQ() {
                         <p style={styles.preview}>{pregunta.respuesta}</p>
                       </td>
                       <td style={styles.td}>
+                        <select
+                          aria-label={`Revisión de ${pregunta.pregunta}`}
+                          value={pregunta.revision}
+                          onChange={(event) => {
+                            const revision =
+                              event.target.value as EstadoRevision;
+                            handleQuickUpdate(pregunta, {
+                              revision,
+                              activo:
+                                revision === 'REVISADA' &&
+                                pregunta.proyecto !== UNASSIGNED_PROCESS,
+                            });
+                          }}
+                          style={{ minWidth: 150, margin: 0 }}
+                        >
+                          <option value="PENDIENTE">Falta revisar</option>
+                          <option value="REVISADA">Revisada</option>
+                        </select>
+                      </td>
+                      <td style={styles.td}>
                         <span
                           style={{
                             ...styles.badge,
@@ -648,7 +851,7 @@ export default function AdminFAQ() {
                             color: pregunta.activo ? '#166534' : '#991b1b',
                           }}
                         >
-                          {pregunta.activo ? 'Activa' : 'Inactiva'}
+                          {pregunta.activo ? 'Visible' : 'Oculta'}
                         </span>
                       </td>
                       <td style={styles.td}>
@@ -673,7 +876,7 @@ export default function AdminFAQ() {
                   ))}
                   {!preguntasFiltradas.length && !loading && (
                     <tr>
-                      <td colSpan={5} style={{ ...styles.td, textAlign: 'center' }}>
+                      <td colSpan={6} style={{ ...styles.td, textAlign: 'center' }}>
                         No hay preguntas para mostrar.
                       </td>
                     </tr>
@@ -691,14 +894,22 @@ export default function AdminFAQ() {
 
           <div style={styles.grid}>
             <div>
-              <label htmlFor="proyecto">Proyecto</label>
+              <label htmlFor="proyecto">Proceso</label>
               <input
                 id="proyecto"
                 list="project-options"
                 value={formData.proyecto}
-                onChange={(event) =>
-                  setFormData({ ...formData, proyecto: event.target.value })
-                }
+                onChange={(event) => {
+                  const proyecto = event.target.value;
+                  setFormData({
+                    ...formData,
+                    proyecto,
+                    activo:
+                      proyecto === UNASSIGNED_PROCESS
+                        ? false
+                        : formData.activo,
+                  });
+                }}
                 required
               />
               <datalist id="project-options">
@@ -742,10 +953,34 @@ export default function AdminFAQ() {
               />
             </div>
             <div>
+              <label htmlFor="revision">Estado de revisión</label>
+              <select
+                id="revision"
+                value={formData.revision}
+                onChange={(event) => {
+                  const revision = event.target.value as EstadoRevision;
+                  setFormData({
+                    ...formData,
+                    revision,
+                    activo:
+                      revision === 'REVISADA' &&
+                      formData.proyecto !== UNASSIGNED_PROCESS,
+                  });
+                }}
+              >
+                <option value="PENDIENTE">Falta revisar</option>
+                <option value="REVISADA">Revisada</option>
+              </select>
+            </div>
+            <div>
               <label htmlFor="activo">Visibilidad</label>
               <select
                 id="activo"
                 value={String(formData.activo)}
+                disabled={
+                  formData.revision !== 'REVISADA' ||
+                  formData.proyecto === UNASSIGNED_PROCESS
+                }
                 onChange={(event) =>
                   setFormData({
                     ...formData,
