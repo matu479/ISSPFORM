@@ -1,80 +1,113 @@
 # ISSP - Formulario de consultas
 
-Starter en Next.js para desplegar en Vercel.
+Aplicación Next.js con un formulario público y un panel para administrar
+preguntas frecuentes en Firebase/Firestore.
 
-## Incluye
+## Arquitectura
 
-- Selector de proyecto: NICE / Policía / Bomberos.
-- Datos del aspirante.
-- Etapas del proceso.
-- Preguntas específicas por etapa.
-- Consulta libre.
-- Validación de correo repetido.
-- Generación de número de ticket.
-- Respuestas automáticas para preguntas frecuentes.
-- Envío opcional a Formspree.
-- Diseño responsive para celular.
+```text
+/admin -> Firestore -> /formulario
+```
 
-## 1. Ejecutar localmente
+Firestore es la única fuente de preguntas y respuestas. El formulario usa una
+suscripción en tiempo real, por lo que los cambios no requieren un nuevo
+deployment.
+
+## Configuración local
+
+1. Ejecutá `npm install`.
+2. Copiá `.env.example` como `.env.local` y completá las variables
+   `NEXT_PUBLIC_FIREBASE_*`.
+3. Ejecutá `npm run dev`.
+
+- Formulario: http://localhost:3000/formulario
+- Administración: http://localhost:3000/admin
+
+## Habilitar el acceso administrativo
+
+En Firebase Console:
+
+1. Abrí **Authentication > Sign-in method**.
+2. Habilitá **Correo electrónico/contraseña**.
+3. En **Authentication > Users**, creá únicamente los usuarios administradores.
+4. Copiá el UID de cada administrador y reemplazá
+   `REEMPLAZAR_CON_UID_ADMIN` en `firestore.rules`.
+5. Publicá las reglas.
+
+Si usás Firebase CLI:
 
 ```bash
-npm install
-npm run dev
+firebase login
+firebase use TU_PROJECT_ID
+firebase deploy --only firestore:rules
 ```
 
-Abrir:
+Las reglas permiten lectura pública de `preguntas-frecuentes` y reservan las
+escrituras para los UID incluidos en `isAdmin()`.
 
-```text
-http://localhost:3000
-```
+## Variables en Vercel
 
-## 2. Conectar Formspree
-
-1. Crear un formulario en Formspree.
-2. Copiar el endpoint, por ejemplo:
-
-```text
-https://formspree.io/f/xxxxxxxx
-```
-
-3. Crear un archivo `.env.local` en la raíz:
+Configurá estas variables tanto para **Production** como para **Preview** si
+vas a desplegar ramas:
 
 ```env
-NEXT_PUBLIC_FORMSPREE_ENDPOINT=https://formspree.io/f/xxxxxxxx
+NEXT_PUBLIC_FIREBASE_API_KEY=
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
+NEXT_PUBLIC_FIREBASE_APP_ID=
+NEXT_PUBLIC_FORMSPREE_ENDPOINT=
 ```
 
-Si la variable no está configurada, la interfaz igualmente funciona en modo demo, pero no envía datos a Formspree.
+## Modelo de las preguntas
 
-## 3. Subir a GitHub
+Cada documento de la colección `preguntas-frecuentes` usa:
 
-Crear un repositorio nuevo y subir estos archivos.
+```ts
+{
+  proyecto: "NICE", // proceso al que pertenece
+  etapa: "Admisión",
+  pregunta: "¿Cuándo me corresponde presentarme?",
+  respuesta: "...",
+  orden: 1,
+  revision: "REVISADA", // o "PENDIENTE"
+  activo: true,
+  creado: Timestamp,
+  actualizado: Timestamp
+}
+```
 
-## 4. Deploy en Vercel
+El campo `orden` es la posición de la pregunta dentro del mismo proceso y
+etapa. El formulario público solo muestra preguntas activas, revisadas y con un
+proceso asignado. Los documentos anteriores con `area`, `numero` y
+`estado` continúan leyéndose para facilitar la migración.
 
-1. New Project.
-2. Importar el repo de GitHub.
-3. Agregar la variable de entorno:
+## Importación del Word
+
+El panel acepta directamente archivos `.docx` de hasta 8 MB. Reconoce tablas,
+columnas separadas por tabulaciones y bloques de texto donde cada pregunta está
+seguida por su respuesta. También interpreta encabezados como pregunta/consulta,
+respuesta modelo, proceso/proyecto, etapa/área/sección, número/orden y
+estado/revisión.
+
+Si el Word solo contiene pregunta y respuesta, cada fila se importa como:
+
+- proceso: `Sin asignar`;
+- etapa: `Sin etapa`;
+- revisión: `PENDIENTE`;
+- visibilidad: oculta.
+
+Después de importar, el administrador puede filtrar las preguntas y asignar el
+proceso y el estado de revisión directamente desde la tabla. Al marcar una
+pregunta como revisada con un proceso asignado, queda visible en el formulario.
+
+También se aceptan archivos CSV o TXT delimitados por barra vertical, punto y
+coma o coma. Un encabezado completo posible es:
 
 ```text
-NEXT_PUBLIC_FORMSPREE_ENDPOINT
+proceso|etapa|orden|pregunta|respuesta|revision|activo
 ```
 
-4. Deploy.
-
-## Personalización
-
-Las etapas y preguntas están en:
-
-```text
-app/page.js
-```
-
-Buscar:
-
-```js
-const STAGES = [...]
-const FAQS = {...}
-const AUTO_ANSWERS = {...}
-```
-
-Ahí se pueden modificar todas las opciones y respuestas sin tocar el resto del formulario.
+Las filas incompletas o duplicadas se omiten. Para cambios posteriores a la
+carga inicial se puede crear, editar o eliminar cada pregunta manualmente.

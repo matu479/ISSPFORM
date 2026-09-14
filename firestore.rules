@@ -1,0 +1,49 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.uid in [
+          'REEMPLAZAR_CON_UID_ADMIN'
+        ];
+    }
+
+    match /preguntas-frecuentes/{questionId} {
+      allow read: if true;
+
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasAll([
+          'proyecto',
+          'etapa',
+          'pregunta',
+          'respuesta',
+          'orden',
+          'activo',
+          'revision'
+        ])
+        && request.resource.data.proyecto is string
+        && request.resource.data.proyecto.size() > 0
+        && request.resource.data.proyecto.size() <= 80
+        && request.resource.data.etapa is string
+        && request.resource.data.etapa.size() > 0
+        && request.resource.data.etapa.size() <= 120
+        && request.resource.data.pregunta is string
+        && request.resource.data.pregunta.size() > 0
+        && request.resource.data.pregunta.size() <= 500
+        && request.resource.data.respuesta is string
+        && request.resource.data.respuesta.size() > 0
+        && request.resource.data.respuesta.size() <= 5000
+        && request.resource.data.orden is number
+        && request.resource.data.orden >= 0
+        && request.resource.data.activo is bool
+        && request.resource.data.revision in ['PENDIENTE', 'REVISADA'];
+
+      allow delete: if isAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
