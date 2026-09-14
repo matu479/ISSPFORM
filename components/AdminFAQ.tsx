@@ -133,14 +133,55 @@ function canonicalHeader(value: string) {
   return normalized;
 }
 
+function detectReviewMarker(value: string): EstadoRevision | '' {
+  if (
+    /\[(?:PENDIENTE|REVISAR|FALTA\s+REVISAR|NO\s+REVISADA?)\]/i.test(value)
+  ) {
+    return 'PENDIENTE';
+  }
+  if (/\[REVISADA?\]/i.test(value)) return 'REVISADA';
+  return '';
+}
+
+function stripReviewMarkers(value: string) {
+  return value
+    .replace(
+      /\s*\[(?:REVISADA?|PENDIENTE|REVISAR|FALTA\s+REVISAR|NO\s+REVISADA?)\]\s*/gi,
+      ' ',
+    )
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function processFromHeading(value: string) {
+  const normalized = normalizeHeader(value);
+  return (
+    DEFAULT_PROJECTS.find((project) =>
+      normalized.includes(normalizeHeader(project)),
+    ) || ''
+  );
+}
+
 function parseParagraphFaqs(paragraphs: string[]) {
-  const rows: string[][] = [['pregunta', 'respuesta']];
+  const rows: string[][] = [
+    ['proyecto', 'pregunta', 'respuesta', 'revision'],
+  ];
+  let currentProcess = UNASSIGNED_PROCESS;
   let currentQuestion = '';
   let answerParts: string[] = [];
 
   const flush = () => {
-    const answer = answerParts.join('\n').trim();
-    if (currentQuestion && answer) rows.push([currentQuestion, answer]);
+    const rawAnswer = answerParts.join('\n').trim();
+    const question = stripReviewMarkers(currentQuestion);
+    const answer = stripReviewMarkers(rawAnswer);
+    const revision =
+      detectReviewMarker(currentQuestion) ||
+      detectReviewMarker(rawAnswer) ||
+      'PENDIENTE';
+
+    if (question && answer) {
+      rows.push([currentProcess, question, answer, revision]);
+    }
     currentQuestion = '';
     answerParts = [];
   };
@@ -150,12 +191,35 @@ function parseParagraphFaqs(paragraphs: string[]) {
       const line = rawLine.replace(/^[•·▪◦]\s*/, '').trim();
       if (!line) continue;
 
+      const headingProcess = processFromHeading(line);
+      const letters = line.replace(/[^a-záéíóúüñ]/gi, '');
+      const looksLikeHeading =
+        line.length <= 120 &&
+        letters.length >= 3 &&
+        line === line.toLocaleUpperCase('es') &&
+        !line.includes('?');
+
+      if (looksLikeHeading) {
+        flush();
+        if (headingProcess) currentProcess = headingProcess;
+        continue;
+      }
+
       const inlinePair = line.match(
         /^(?:pregunta|consulta)(?:\s+\d+)?\s*[:.-]\s*(.+?)\s+(?:respuesta)(?:\s+(?:modelo|automatica|sugerida))?\s*[:.-]\s*(.+)$/i,
       );
       if (inlinePair) {
         flush();
-        rows.push([inlinePair[1].trim(), inlinePair[2].trim()]);
+        const revision =
+          detectReviewMarker(inlinePair[1]) ||
+          detectReviewMarker(inlinePair[2]) ||
+          'PENDIENTE';
+        rows.push([
+          currentProcess,
+          stripReviewMarkers(inlinePair[1]),
+          stripReviewMarkers(inlinePair[2]),
+          revision,
+        ]);
         continue;
       }
 
@@ -185,9 +249,10 @@ function parseParagraphFaqs(paragraphs: string[]) {
       }
 
       const withoutNumber = line.replace(/^\d+[).:-]?\s*/, '').trim();
+      const cleanCandidate = stripReviewMarkers(withoutNumber);
       const looksLikeQuestion =
-        withoutNumber.startsWith('¿') ||
-        (withoutNumber.endsWith('?') && withoutNumber.length <= 500);
+        cleanCandidate.startsWith('¿') ||
+        (cleanCandidate.endsWith('?') && cleanCandidate.length <= 500);
 
       if (looksLikeQuestion) {
         flush();
@@ -612,8 +677,13 @@ export default function AdminFAQ() {
             values.area ||
             values.seccion ||
             'Sin etapa';
-          const pregunta = values.pregunta;
-          const respuesta = values.respuesta;
+          const rawPregunta = values.pregunta;
+          const rawRespuesta = values.respuesta;
+          const markerRevision =
+            detectReviewMarker(rawPregunta) ||
+            detectReviewMarker(rawRespuesta);
+          const pregunta = stripReviewMarkers(rawPregunta);
+          const respuesta = stripReviewMarkers(rawRespuesta);
 
           if (!pregunta || !respuesta) {
             skipped += 1;
@@ -647,12 +717,18 @@ export default function AdminFAQ() {
             values.revision ||
             values.estado ||
             values.revisada ||
+            markerRevision ||
             ''
           ).toLocaleLowerCase('es');
+          const explicitlyPending =
+            rawStatus.includes('pend') ||
+            rawStatus.includes('falta') ||
+            rawStatus.includes('no revis');
           const revision: EstadoRevision =
-            rawStatus.includes('revisad') ||
-            rawStatus.includes('aprobad') ||
-            ['si', 'sí', 'true', '1'].includes(rawStatus)
+            !explicitlyPending &&
+            (rawStatus.includes('revisad') ||
+              rawStatus.includes('aprobad') ||
+              ['si', 'sí', 'true', '1'].includes(rawStatus))
               ? 'REVISADA'
               : 'PENDIENTE';
 
