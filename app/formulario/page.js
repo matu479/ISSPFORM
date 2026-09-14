@@ -134,7 +134,6 @@ export default function Home() {
       faqs.filter(
         (item) =>
           item.activo &&
-          item.revision === "REVISADA" &&
           item.proyecto !== "Sin asignar"
       ),
     [faqs]
