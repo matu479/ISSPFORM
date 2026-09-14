@@ -40,7 +40,8 @@ En Firebase Console:
 1. Abrí **Authentication > Sign-in method**.
 2. Habilitá **Correo electrónico/contraseña**.
 3. En **Authentication > Users**, creá únicamente los usuarios administradores.
-4. Publicá las reglas incluidas en `firestore.rules`.
+4. Copiá el UID de cada administrador y reemplazá `REEMPLAZAR_CON_UID_ADMIN` en `firestore.rules`.
+5. Publicá las reglas.
 
 Si usás Firebase CLI:
 
@@ -51,7 +52,8 @@ firebase deploy --only firestore:rules
 ```
 
 Las reglas permiten lectura pública de `preguntas-frecuentes` y reservan las
-escrituras para usuarios autenticados. El panel no ofrece registro público.
+escrituras para los UID incluidos en `isAdmin()`. Para autorizar más de un
+administrador, agregá sus UID separados por comas dentro de la lista.
 
 ## Variables en Vercel
 
