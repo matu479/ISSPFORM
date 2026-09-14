@@ -85,9 +85,10 @@ proceso asignado. Los documentos anteriores con `area`, `numero` y
 
 ## Importación del Word
 
-El panel acepta directamente archivos `.docx` de hasta 8 MB. Busca tablas que
-tengan encabezados de pregunta/consulta y respuesta; también reconoce columnas
-opcionales de proceso/proyecto, etapa/área/sección, número/orden y
+El panel acepta directamente archivos `.docx` de hasta 8 MB. Reconoce tablas,
+columnas separadas por tabulaciones y bloques de texto donde cada pregunta está
+seguida por su respuesta. También interpreta encabezados como pregunta/consulta,
+respuesta modelo, proceso/proyecto, etapa/área/sección, número/orden y
 estado/revisión.
 
 Si el Word solo contiene pregunta y respuesta, cada fila se importa como:

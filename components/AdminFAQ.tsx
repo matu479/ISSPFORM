@@ -133,6 +133,75 @@ function canonicalHeader(value: string) {
   return normalized;
 }
 
+function parseParagraphFaqs(paragraphs: string[]) {
+  const rows: string[][] = [['pregunta', 'respuesta']];
+  let currentQuestion = '';
+  let answerParts: string[] = [];
+
+  const flush = () => {
+    const answer = answerParts.join('\n').trim();
+    if (currentQuestion && answer) rows.push([currentQuestion, answer]);
+    currentQuestion = '';
+    answerParts = [];
+  };
+
+  for (const rawParagraph of paragraphs) {
+    for (const rawLine of rawParagraph.split(/\n+/)) {
+      const line = rawLine.replace(/^[•·▪◦]\s*/, '').trim();
+      if (!line) continue;
+
+      const inlinePair = line.match(
+        /^(?:pregunta|consulta)(?:\s+\d+)?\s*[:.-]\s*(.+?)\s+(?:respuesta)(?:\s+(?:modelo|automatica|sugerida))?\s*[:.-]\s*(.+)$/i,
+      );
+      if (inlinePair) {
+        flush();
+        rows.push([inlinePair[1].trim(), inlinePair[2].trim()]);
+        continue;
+      }
+
+      const questionLabel = line.match(
+        /^(?:\d+[).:-]?\s*)?(?:pregunta|consulta)(?:\s+\d+)?\s*[:.-]\s*(.+)$/i,
+      );
+      if (questionLabel) {
+        flush();
+        currentQuestion = questionLabel[1].trim();
+        continue;
+      }
+
+      const answerLabel = line.match(
+        /^(?:respuesta)(?:\s+(?:modelo|automatica|sugerida))?\s*[:.-]\s*(.*)$/i,
+      );
+      if (answerLabel && currentQuestion) {
+        if (answerLabel[1]) answerParts.push(answerLabel[1].trim());
+        continue;
+      }
+
+      if (
+        /^(pregunta|consulta|respuesta(?:\s+(?:modelo|automatica|sugerida))?)\s*:?$/i.test(
+          line,
+        )
+      ) {
+        continue;
+      }
+
+      const withoutNumber = line.replace(/^\d+[).:-]?\s*/, '').trim();
+      const looksLikeQuestion =
+        withoutNumber.startsWith('¿') ||
+        (withoutNumber.endsWith('?') && withoutNumber.length <= 500);
+
+      if (looksLikeQuestion) {
+        flush();
+        currentQuestion = withoutNumber;
+      } else if (currentQuestion) {
+        answerParts.push(line);
+      }
+    }
+  }
+
+  flush();
+  return rows;
+}
+
 export default function AdminFAQ() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -454,7 +523,20 @@ export default function AdminFAQ() {
           throw new Error(payload.error || 'No se pudo leer el Word.');
         }
 
-        tables = payload.tables;
+        const paragraphRows = Array.isArray(payload.paragraphs)
+          ? payload.paragraphs
+              .map((paragraph: string) => paragraph.split('\t'))
+              .filter((row: string[]) => row.some(Boolean))
+          : [];
+        const paragraphFaqs = Array.isArray(payload.paragraphs)
+          ? parseParagraphFaqs(payload.paragraphs)
+          : [];
+
+        tables = [
+          ...(Array.isArray(payload.tables) ? payload.tables : []),
+          paragraphRows,
+          paragraphFaqs,
+        ].filter((rows) => rows.length > 1);
       } else {
         if (file.size > 1_000_000) {
           throw new Error('El archivo supera el límite de 1 MB.');
@@ -491,7 +573,7 @@ export default function AdminFAQ() {
 
       if (parsedTables.length === 0) {
         throw new Error(
-          'No encontré una tabla con las columnas Pregunta y Respuesta.',
+          'No pude reconocer pares de Pregunta y Respuesta en el Word.',
         );
       }
 

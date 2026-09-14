@@ -79,11 +79,19 @@ function decodeXml(value: string) {
 }
 
 function extractParagraphText(xml: string) {
-  const textParts = [...xml.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)]
-    .map((match) => decodeXml(match[1]))
+  const withSeparators = xml
+    .replace(/<w:tab(?:\s[^>]*)?\/?\s*>/g, '\t')
+    .replace(/<w:(?:br|cr)(?:\s[^>]*)?\/?\s*>/g, '\n');
+  const textParts = [...withSeparators.matchAll(
+    /<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>|([\t\n])/g,
+  )]
+    .map((match) => (match[1] ? decodeXml(match[1]) : match[2]))
     .join('');
 
-  return textParts.replace(/\s+/g, ' ').trim();
+  return textParts
+    .replace(/[ \u00a0]+/g, ' ')
+    .replace(/\s*\n\s*/g, '\n')
+    .trim();
 }
 
 function extractCellText(xml: string) {
@@ -126,17 +134,25 @@ export async function POST(request: Request) {
     }
 
     const archive = Buffer.from(await uploaded.arrayBuffer());
-    const documentXml = extractZipEntry(archive, 'word/document.xml').toString('utf8');
+    const documentXml = extractZipEntry(
+      archive,
+      'word/document.xml',
+    ).toString('utf8');
     const tables = extractTables(documentXml);
+    const paragraphs = [
+      ...documentXml.matchAll(/<w:p(?:\s[^>]*)?>([\s\S]*?)<\/w:p>/g),
+    ]
+      .map((match) => extractParagraphText(match[1]))
+      .filter(Boolean);
 
-    if (tables.length === 0) {
+    if (tables.length === 0 && paragraphs.length === 0) {
       return Response.json(
-        { error: 'No se encontraron tablas con preguntas dentro del Word.' },
+        { error: 'No se encontró texto para importar dentro del Word.' },
         { status: 422 },
       );
     }
 
-    return Response.json({ tables });
+    return Response.json({ tables, paragraphs });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'No se pudo procesar el Word.';
