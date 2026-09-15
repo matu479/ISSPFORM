@@ -31,8 +31,8 @@ import {
 } from '@/lib/faq';
 
 type FormData = {
-  proyecto: string;
-  etapa: string;
+  proyectos: string[];
+  etapas: string[];
   pregunta: string;
   respuesta: string;
   orden: number;
@@ -41,8 +41,8 @@ type FormData = {
 };
 
 const EMPTY_FORM: FormData = {
-  proyecto: 'NICE',
-  etapa: 'Admisión',
+  proyectos: ['NICE'],
+  etapas: ['Admisión'],
   pregunta: '',
   respuesta: '',
   orden: 1,
@@ -373,7 +373,7 @@ export default function AdminFAQ() {
 
   const proyectos = useMemo(
     () =>
-      [...new Set([...DEFAULT_PROJECTS, ...preguntas.map((p) => p.proyecto)])]
+      [...new Set([...DEFAULT_PROJECTS, ...preguntas.flatMap((p) => p.proyectos)])]
         .filter(Boolean)
         .sort((a, b) => a.localeCompare(b, 'es')),
     [preguntas],
@@ -381,7 +381,7 @@ export default function AdminFAQ() {
 
   const etapas = useMemo(
     () =>
-      [...new Set([...DEFAULT_STAGES, ...preguntas.map((p) => p.etapa)])]
+      [...new Set([...DEFAULT_STAGES, ...preguntas.flatMap((p) => p.etapas)])]
         .filter(Boolean)
         .sort((a, b) => {
           const aIndex = DEFAULT_STAGES.indexOf(a);
@@ -399,8 +399,8 @@ export default function AdminFAQ() {
 
     return preguntas.filter((pregunta) => {
       const matchesProject =
-        !filtroProyecto || pregunta.proyecto === filtroProyecto;
-      const matchesStage = !filtroEtapa || pregunta.etapa === filtroEtapa;
+        !filtroProyecto || pregunta.proyectos.includes(filtroProyecto);
+      const matchesStage = !filtroEtapa || pregunta.etapas.includes(filtroEtapa);
       const matchesRevision =
         !filtroRevision || pregunta.revision === filtroRevision;
       const matchesSearch =
@@ -423,7 +423,11 @@ export default function AdminFAQ() {
       Math.max(
         0,
         ...preguntas
-          .filter((item) => item.proyecto === proyecto && item.etapa === etapa)
+          .filter(
+            (item) =>
+              item.proyectos.includes(proyecto) &&
+              item.etapas.includes(etapa),
+          )
           .map((item) => item.orden),
       ) + 1
     );
@@ -434,8 +438,8 @@ export default function AdminFAQ() {
     const etapa = filtroEtapa || 'Admisión';
     setFormData({
       ...EMPTY_FORM,
-      proyecto,
-      etapa,
+      proyectos: [proyecto],
+      etapas: [etapa],
       orden: nextOrder(proyecto, etapa),
     });
     setNotice('');
@@ -444,8 +448,8 @@ export default function AdminFAQ() {
 
   function startEdit(pregunta: PreguntaFAQ) {
     setFormData({
-      proyecto: pregunta.proyecto,
-      etapa: pregunta.etapa,
+      proyectos: [...pregunta.proyectos],
+      etapas: [...pregunta.etapas],
       pregunta: pregunta.pregunta,
       respuesta: pregunta.respuesta,
       orden: pregunta.orden,
@@ -455,6 +459,27 @@ export default function AdminFAQ() {
     setEditandoId(pregunta.id);
     setNotice('');
     setModo('editar');
+  }
+
+  function toggleFormValue(
+    field: 'proyectos' | 'etapas',
+    value: string,
+  ) {
+    setFormData((previous) => {
+      const current = previous[field];
+      const next = current.includes(value)
+        ? current.filter((item) => item !== value)
+        : [...current, value];
+
+      return {
+        ...previous,
+        [field]: next,
+        activo:
+          field === 'proyectos' && next.length === 0
+            ? false
+            : previous.activo,
+      };
+    });
   }
 
   function cancelEdit() {
@@ -485,45 +510,59 @@ export default function AdminFAQ() {
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
+    const proyectosSeleccionados = [...new Set(formData.proyectos)]
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const etapasSeleccionadas = [...new Set(formData.etapas)]
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const hasAssignedProject = proyectosSeleccionados.some(
+      (item) => item !== UNASSIGNED_PROCESS,
+    );
+
     const cleanData = {
-      proyecto: formData.proyecto.trim(),
-      etapa: formData.etapa.trim(),
+      proyectos: proyectosSeleccionados,
+      etapas: etapasSeleccionadas,
+      // Se conservan los campos escalares para reglas y documentos anteriores.
+      proyecto: proyectosSeleccionados[0] || UNASSIGNED_PROCESS,
+      etapa: etapasSeleccionadas[0] || 'Sin etapa',
       pregunta: formData.pregunta.trim(),
       respuesta: formData.respuesta.trim(),
       orden: Number(formData.orden),
-      activo:
-        formData.revision === 'REVISADA' &&
-        formData.proyecto.trim() !== UNASSIGNED_PROCESS
-          ? formData.activo
-          : false,
+      activo: hasAssignedProject ? formData.activo : false,
       revision: formData.revision,
     };
 
     if (
-      !cleanData.proyecto ||
-      !cleanData.etapa ||
+      cleanData.proyectos.length === 0 ||
+      cleanData.etapas.length === 0 ||
       !cleanData.pregunta ||
       !cleanData.respuesta ||
       !Number.isFinite(cleanData.orden) ||
       cleanData.orden < 0
     ) {
-      setNotice('Completá todos los campos y usá un orden válido.');
+      setNotice(
+        'Seleccioná al menos un proyecto y una etapa, y completá los demás campos.',
+      );
       return;
     }
 
     const duplicate = preguntas.find(
       (item) =>
         item.id !== editandoId &&
-        duplicateKey(item.proyecto, item.etapa, item.pregunta) ===
+        duplicateKey(item.proyectos, item.etapas, item.pregunta) ===
           duplicateKey(
-            cleanData.proyecto,
-            cleanData.etapa,
+            cleanData.proyectos,
+            cleanData.etapas,
             cleanData.pregunta,
           ),
     );
 
     if (duplicate) {
-      setNotice('Ya existe esa pregunta para el mismo proceso y etapa.');
+      setNotice(
+        'Ya existe esa pregunta con la misma combinación de proyectos y etapas.',
+      );
       return;
     }
 
@@ -604,7 +643,10 @@ export default function AdminFAQ() {
 
   async function handleEnableAllForTest() {
     const eligible = preguntas.filter(
-      (pregunta) => pregunta.proyecto !== UNASSIGNED_PROCESS,
+      (pregunta) =>
+        pregunta.proyectos.some(
+          (proyecto) => proyecto !== UNASSIGNED_PROCESS,
+        ),
     );
     const skipped = preguntas.length - eligible.length;
 
@@ -690,9 +732,61 @@ export default function AdminFAQ() {
     }
   }
 
+  async function handleRandomAssignment() {
+    if (!preguntas.length) return;
+
+    const confirmed = confirm(
+      `Se asignarán aleatoriamente ${preguntas.length} preguntas a uno o más proyectos y a una sola etapa. La revisión y la visibilidad no cambiarán. ¿Continuar?`,
+    );
+    if (!confirmed) return;
+
+    setSaving(true);
+    setNotice('');
+
+    try {
+      const { db } = getFirebaseServices();
+
+      for (let index = 0; index < preguntas.length; index += 400) {
+        const batch = writeBatch(db);
+
+        for (const pregunta of preguntas.slice(index, index + 400)) {
+          const shuffledProjects = [...DEFAULT_PROJECTS].sort(
+            () => Math.random() - 0.5,
+          );
+          const projectCount = Math.random() < 0.35 ? 2 : 1;
+          const assignedProjects = shuffledProjects.slice(0, projectCount);
+          const assignedStage =
+            DEFAULT_STAGES[
+              Math.floor(Math.random() * DEFAULT_STAGES.length)
+            ];
+
+          batch.update(doc(db, FAQ_COLLECTION, pregunta.id), {
+            proyectos: assignedProjects,
+            etapas: [assignedStage],
+            proyecto: assignedProjects[0],
+            etapa: assignedStage,
+            actualizado: serverTimestamp(),
+          });
+        }
+
+        await batch.commit();
+      }
+
+      setNotice(
+        `${preguntas.length} pregunta(s) asignada(s) aleatoriamente. Cada una tiene una sola etapa y uno o dos proyectos.`,
+      );
+    } catch (error) {
+      setNotice(
+        `No se pudo completar la asignación: ${getErrorMessage(error)}`,
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function handleQuickUpdate(
     pregunta: PreguntaFAQ,
-    changes: Partial<Pick<PreguntaFAQ, 'proyecto' | 'revision' | 'activo'>>,
+    changes: Partial<Pick<PreguntaFAQ, 'revision' | 'activo'>>,
   ) {
     setNotice('');
 
@@ -791,13 +885,13 @@ export default function AdminFAQ() {
 
       const existingKeys = new Set(
         preguntas.map((item) =>
-          duplicateKey(item.proyecto, item.etapa, item.pregunta),
+          duplicateKey(item.proyectos, item.etapas, item.pregunta),
         ),
       );
       const groupMaximums = new Map<string, number>();
 
       for (const item of preguntas) {
-        const group = duplicateKey(item.proyecto, item.etapa, '');
+        const group = duplicateKey(item.proyectos, item.etapas, '');
         groupMaximums.set(
           group,
           Math.max(groupMaximums.get(group) ?? 0, item.orden),
@@ -897,6 +991,8 @@ export default function AdminFAQ() {
             proyecto !== UNASSIGNED_PROCESS;
 
           records.push({
+            proyectos: [proyecto],
+            etapas: [etapa],
             proyecto,
             etapa,
             pregunta,
@@ -1027,7 +1123,7 @@ export default function AdminFAQ() {
               onChange={(event) => setFiltroProyecto(event.target.value)}
               style={{ flex: '0 1 180px', margin: 0 }}
             >
-              <option value="">Todos los procesos</option>
+              <option value="">Todos los proyectos</option>
               {proyectos.map((proyecto) => (
                 <option key={proyecto} value={proyecto}>
                   {proyecto}
@@ -1055,6 +1151,18 @@ export default function AdminFAQ() {
               <option value="PENDIENTE">Pendientes de revisión</option>
               <option value="REVISADA">Revisadas</option>
             </select>
+            <button
+              type="button"
+              onClick={handleRandomAssignment}
+              disabled={saving || preguntas.length === 0}
+              title="Asigna uno o dos proyectos y una sola etapa a cada pregunta"
+              style={{
+                ...styles.randomButton,
+                opacity: saving || preguntas.length === 0 ? 0.55 : 1,
+              }}
+            >
+              Asignar aleatoriamente
+            </button>
             <button
               type="button"
               onClick={handleEnableAllForTest}
@@ -1130,8 +1238,8 @@ export default function AdminFAQ() {
               <table style={styles.table}>
                 <thead>
                   <tr>
-                    <th style={styles.th}>Proceso</th>
-                    <th style={styles.th}>Etapa / N.º</th>
+                    <th style={styles.th}>Proyectos</th>
+                    <th style={styles.th}>Procesos / etapas · N.º</th>
                     <th style={styles.th}>Pregunta y respuesta</th>
                     <th style={styles.th}>Revisión</th>
                     <th style={styles.th}>Visibilidad</th>
@@ -1142,36 +1250,22 @@ export default function AdminFAQ() {
                   {preguntasFiltradas.map((pregunta) => (
                     <tr key={pregunta.id}>
                       <td style={styles.td}>
-                        <select
-                          aria-label={`Proceso de ${pregunta.pregunta}`}
-                          value={pregunta.proyecto}
-                          onChange={(event) => {
-                            const proyecto = event.target.value;
-                            handleQuickUpdate(pregunta, {
-                              proyecto,
-                              activo:
-                                proyecto === UNASSIGNED_PROCESS
-                                  ? false
-                                  : pregunta.revision === 'REVISADA',
-                            });
-                          }}
-                          style={{ minWidth: 150, margin: 0 }}
-                        >
-                          {[UNASSIGNED_PROCESS, ...proyectos]
-                            .filter(
-                              (value, index, items) =>
-                                items.indexOf(value) === index,
-                            )
-                            .map((proyecto) => (
-                              <option key={proyecto} value={proyecto}>
-                                {proyecto}
-                              </option>
-                            ))}
-                        </select>
+                        <div style={styles.tagList}>
+                          {pregunta.proyectos.map((proyecto) => (
+                            <span key={proyecto} style={styles.projectTag}>
+                              {proyecto}
+                            </span>
+                          ))}
+                        </div>
                       </td>
                       <td style={styles.td}>
-                        {pregunta.etapa}
-                        <br />
+                        <div style={styles.tagList}>
+                          {pregunta.etapas.map((etapa) => (
+                            <span key={etapa} style={styles.stageTag}>
+                              {etapa}
+                            </span>
+                          ))}
+                        </div>
                         <small>N.º {pregunta.orden}</small>
                       </td>
                       <td style={styles.td}>
@@ -1189,7 +1283,10 @@ export default function AdminFAQ() {
                               revision,
                               activo:
                                 revision === 'REVISADA' &&
-                                pregunta.proyecto !== UNASSIGNED_PROCESS,
+                                pregunta.proyectos.some(
+                                  (proyecto) =>
+                                    proyecto !== UNASSIGNED_PROCESS,
+                                ),
                             });
                           }}
                           style={{ minWidth: 150, margin: 0 }}
@@ -1248,48 +1345,48 @@ export default function AdminFAQ() {
           </h2>
 
           <div style={styles.grid}>
-            <div>
-              <label htmlFor="proyecto">Proceso</label>
-              <input
-                id="proyecto"
-                list="project-options"
-                value={formData.proyecto}
-                onChange={(event) => {
-                  const proyecto = event.target.value;
-                  setFormData({
-                    ...formData,
-                    proyecto,
-                    activo:
-                      proyecto === UNASSIGNED_PROCESS
-                        ? false
-                        : formData.activo,
-                  });
-                }}
-                required
-              />
-              <datalist id="project-options">
-                {proyectos.map((proyecto) => (
-                  <option key={proyecto} value={proyecto} />
-                ))}
-              </datalist>
-            </div>
-            <div>
-              <label htmlFor="etapa">Etapa</label>
-              <input
-                id="etapa"
-                list="stage-options"
-                value={formData.etapa}
-                onChange={(event) =>
-                  setFormData({ ...formData, etapa: event.target.value })
-                }
-                required
-              />
-              <datalist id="stage-options">
+            <fieldset style={styles.multiSelect}>
+              <legend>Proyectos</legend>
+              <p style={styles.fieldHelp}>
+                Podés seleccionar uno o más proyectos.
+              </p>
+              <div style={styles.checkGrid}>
+                {proyectos
+                  .filter((proyecto) => proyecto !== UNASSIGNED_PROCESS)
+                  .map((proyecto) => (
+                    <label key={proyecto} style={styles.checkOption}>
+                      <input
+                        type="checkbox"
+                        checked={formData.proyectos.includes(proyecto)}
+                        onChange={() =>
+                          toggleFormValue('proyectos', proyecto)
+                        }
+                        style={styles.checkInput}
+                      />
+                      <span>{proyecto}</span>
+                    </label>
+                  ))}
+              </div>
+            </fieldset>
+            <fieldset style={styles.multiSelect}>
+              <legend>Procesos / etapas</legend>
+              <p style={styles.fieldHelp}>
+                Podés seleccionar una o más etapas.
+              </p>
+              <div style={styles.checkGrid}>
                 {etapas.map((etapa) => (
-                  <option key={etapa} value={etapa} />
+                  <label key={etapa} style={styles.checkOption}>
+                    <input
+                      type="checkbox"
+                      checked={formData.etapas.includes(etapa)}
+                      onChange={() => toggleFormValue('etapas', etapa)}
+                      style={styles.checkInput}
+                    />
+                    <span>{etapa}</span>
+                  </label>
                 ))}
-              </datalist>
-            </div>
+              </div>
+            </fieldset>
             <div>
               <label htmlFor="orden">N.º de pregunta</label>
               <input
@@ -1319,7 +1416,9 @@ export default function AdminFAQ() {
                     revision,
                     activo:
                       revision === 'REVISADA' &&
-                      formData.proyecto !== UNASSIGNED_PROCESS,
+                      formData.proyectos.some(
+                        (proyecto) => proyecto !== UNASSIGNED_PROCESS,
+                      ),
                   });
                 }}
               >
@@ -1333,8 +1432,7 @@ export default function AdminFAQ() {
                 id="activo"
                 value={String(formData.activo)}
                 disabled={
-                  formData.revision !== 'REVISADA' ||
-                  formData.proyecto === UNASSIGNED_PROCESS
+                  formData.proyectos.length === 0
                 }
                 onChange={(event) =>
                   setFormData({
@@ -1455,6 +1553,16 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     fontWeight: 700,
   },
+  randomButton: {
+    minHeight: 46,
+    padding: '10px 18px',
+    background: '#0f766e',
+    color: '#fff',
+    border: 0,
+    borderRadius: 7,
+    cursor: 'pointer',
+    fontWeight: 700,
+  },
   testButton: {
     minHeight: 46,
     padding: '10px 18px',
@@ -1528,6 +1636,69 @@ const styles: Record<string, React.CSSProperties> = {
     border: 0,
     borderRadius: 5,
     cursor: 'pointer',
+  },
+  multiSelect: {
+    minWidth: 0,
+    padding: 16,
+    margin: 0,
+    background: '#f8fafc',
+    border: '1px solid #cbd5e1',
+    borderRadius: 9,
+  },
+  fieldHelp: {
+    margin: '2px 0 12px',
+    color: '#64748b',
+    fontSize: 13,
+  },
+  checkGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+    gap: 8,
+  },
+  checkOption: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 9,
+    minHeight: 42,
+    padding: '8px 10px',
+    margin: 0,
+    background: '#fff',
+    border: '1px solid #dbe3ec',
+    borderRadius: 7,
+    cursor: 'pointer',
+    fontWeight: 600,
+  },
+  checkInput: {
+    width: 18,
+    height: 18,
+    minHeight: 0,
+    padding: 0,
+    margin: 0,
+    accentColor: '#003d7a',
+  },
+  tagList: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 6,
+  },
+  projectTag: {
+    display: 'inline-block',
+    padding: '4px 8px',
+    color: '#1e3a8a',
+    background: '#dbeafe',
+    borderRadius: 999,
+    fontSize: 12,
+    fontWeight: 700,
+  },
+  stageTag: {
+    display: 'inline-block',
+    padding: '4px 8px',
+    color: '#065f46',
+    background: '#d1fae5',
+    borderRadius: 999,
+    fontSize: 12,
+    fontWeight: 700,
   },
   editor: {
     maxWidth: 900,
