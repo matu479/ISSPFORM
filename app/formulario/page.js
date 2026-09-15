@@ -12,6 +12,7 @@ import {
 } from "@/lib/faq";
 
 const RESULT_LIMIT = 24;
+const INITIAL_SUGGESTION_LIMIT = 6;
 
 function makeTicket() {
   const now = new Date();
@@ -27,6 +28,17 @@ function normalizeSearch(value) {
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9ñ]+/g, " ")
     .trim();
+}
+
+function getSuggestionScore(value) {
+  let hash = 2166136261;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return hash >>> 0;
 }
 
 function getSearchScore(item, tokens, normalizedQuery) {
@@ -60,6 +72,7 @@ export default function Home() {
   const [project, setProject] = useState("");
   const [stage, setStage] = useState("");
   const [search, setSearch] = useState("");
+  const [suggestionSeed] = useState(() => Math.random().toString(36).slice(2));
   const [selectedQuestionId, setSelectedQuestionId] = useState("");
   const [supportQuestionId, setSupportQuestionId] = useState("");
   const [supportOpen, setSupportOpen] = useState(false);
@@ -136,11 +149,23 @@ export default function Home() {
     [publicFaqs]
   );
 
+  const suggestedFaqs = useMemo(
+    () =>
+      [...publicFaqs]
+        .sort(
+          (a, b) =>
+            getSuggestionScore(`${suggestionSeed}:${a.id}`) -
+            getSuggestionScore(`${suggestionSeed}:${b.id}`)
+        )
+        .slice(0, INITIAL_SUGGESTION_LIMIT),
+    [publicFaqs, suggestionSeed]
+  );
+
   const filteredFaqs = useMemo(() => {
     const normalizedQuery = normalizeSearch(search);
     const tokens = normalizedQuery.split(/\s+/).filter(Boolean);
 
-    if (!project && !tokens.length) return [];
+    if (!project && !tokens.length) return suggestedFaqs;
 
     return publicFaqs
       .filter(
@@ -161,7 +186,7 @@ export default function Home() {
       )
       .slice(0, RESULT_LIMIT)
       .map(({ item }) => item);
-  }, [project, publicFaqs, search, stage]);
+  }, [project, publicFaqs, search, stage, suggestedFaqs]);
 
   const selectedQuestion = useMemo(
     () => publicFaqs.find((item) => item.id === selectedQuestionId) || null,
@@ -357,14 +382,14 @@ export default function Home() {
         <section className="faq-results" aria-live="polite">
           <div className="faq-results-heading">
             <div>
-              <h2>{search ? "Resultados de búsqueda" : project ? `Preguntas de ${project}` : "Preguntas frecuentes"}</h2>
+              <h2>{search ? "Resultados de búsqueda" : project ? `Preguntas de ${project}` : "Preguntas sugeridas"}</h2>
               {!loadingFaqs && (
                 <p>
                   {filteredFaqs.length
-                    ? `${filteredFaqs.length} pregunta${filteredFaqs.length === 1 ? "" : "s"} para consultar`
-                    : !search && !project
-                      ? "Escribí en el buscador o seleccioná un proyecto para comenzar"
-                      : "No encontramos una pregunta relacionada"}
+                    ? !search && !project
+                      ? `${filteredFaqs.length} preguntas frecuentes para empezar`
+                      : `${filteredFaqs.length} pregunta${filteredFaqs.length === 1 ? "" : "s"} para consultar`
+                    : "No encontramos una pregunta relacionada"}
                 </p>
               )}
             </div>
@@ -374,11 +399,6 @@ export default function Home() {
             <div className="faq-status">Cargando preguntas…</div>
           ) : faqError ? (
             <div className="faq-error">{faqError}</div>
-          ) : !search && !project ? (
-            <div className="faq-empty faq-empty-start">
-              <strong>¿Qué necesitás saber?</strong>
-              <p>Usá el buscador general o elegí tu proyecto para recorrer sus etapas.</p>
-            </div>
           ) : filteredFaqs.length ? (
             <div className="faq-question-list">
               {filteredFaqs.map((item) => (
