@@ -6,12 +6,11 @@ import { getFirebaseServices } from "@/lib/firebase";
 import {
   comparePreguntas,
   DEFAULT_PROJECTS,
-  DEFAULT_STAGES,
   FAQ_COLLECTION,
-  normalizePregunta
+  normalizePregunta,
+  PROCESS_TIMELINE
 } from "@/lib/faq";
 
-const ALL_PROJECTS = "__todos__";
 const RESULT_LIMIT = 24;
 
 function makeTicket() {
@@ -30,22 +29,12 @@ function normalizeSearch(value) {
     .trim();
 }
 
-function stageComparator(a, b) {
-  const aIndex = DEFAULT_STAGES.indexOf(a);
-  const bIndex = DEFAULT_STAGES.indexOf(b);
-
-  if (aIndex >= 0 && bIndex >= 0) return aIndex - bIndex;
-  if (aIndex >= 0) return -1;
-  if (bIndex >= 0) return 1;
-  return a.localeCompare(b, "es");
-}
-
 function getSearchScore(item, tokens, normalizedQuery) {
   if (!tokens.length) return 1;
 
   const question = normalizeSearch(item.pregunta);
   const answer = normalizeSearch(item.respuesta);
-  const context = normalizeSearch(`${item.proyecto} ${item.etapa}`);
+  const context = normalizeSearch(`${item.proyectos.join(" ")} ${item.etapas.join(" ")}`);
   const allText = `${question} ${answer} ${context}`;
 
   if (!tokens.every((token) => allText.includes(token))) return -1;
@@ -68,10 +57,9 @@ export default function Home() {
   const [faqs, setFaqs] = useState([]);
   const [loadingFaqs, setLoadingFaqs] = useState(true);
   const [faqError, setFaqError] = useState("");
-  const [project, setProject] = useState("NICE");
+  const [project, setProject] = useState("");
   const [stage, setStage] = useState("");
   const [search, setSearch] = useState("");
-  const [showFilters, setShowFilters] = useState(false);
   const [selectedQuestionId, setSelectedQuestionId] = useState("");
   const [supportQuestionId, setSupportQuestionId] = useState("");
   const [supportOpen, setSupportOpen] = useState(false);
@@ -134,36 +122,31 @@ export default function Home() {
       faqs.filter(
         (item) =>
           item.activo &&
-          item.proyecto !== "Sin asignar"
+          item.proyectos.some((value) => value !== "Sin asignar")
       ),
     [faqs]
   );
 
   const projects = useMemo(
     () =>
-      [...new Set([...DEFAULT_PROJECTS, ...publicFaqs.map((item) => item.proyecto)])]
+      [...new Set([...DEFAULT_PROJECTS, ...publicFaqs.flatMap((item) => item.proyectos)])]
         .filter(Boolean)
+        .filter((item) => item !== "Sin asignar")
         .sort((a, b) => a.localeCompare(b, "es")),
     [publicFaqs]
   );
-
-  const stages = useMemo(() => {
-    const candidates = publicFaqs
-      .filter((item) => project === ALL_PROJECTS || item.proyecto === project)
-      .map((item) => item.etapa);
-
-    return [...new Set(candidates)].filter(Boolean).sort(stageComparator);
-  }, [publicFaqs, project]);
 
   const filteredFaqs = useMemo(() => {
     const normalizedQuery = normalizeSearch(search);
     const tokens = normalizedQuery.split(/\s+/).filter(Boolean);
 
+    if (!project && !tokens.length) return [];
+
     return publicFaqs
       .filter(
         (item) =>
-          (project === ALL_PROJECTS || item.proyecto === project) &&
-          (!stage || item.etapa === stage)
+          (!project || item.proyectos.includes(project)) &&
+          (!stage || item.etapas.includes(stage))
       )
       .map((item) => ({
         item,
@@ -189,10 +172,6 @@ export default function Home() {
     () => publicFaqs.find((item) => item.id === supportQuestionId) || null,
     [publicFaqs, supportQuestionId]
   );
-
-  useEffect(() => {
-    if (stage && !stages.includes(stage)) setStage("");
-  }, [stage, stages]);
 
   function chooseProject(value) {
     setProject(value);
@@ -250,13 +229,12 @@ export default function Home() {
     const payload = {
       ticket,
       proyecto:
-        supportQuestion?.proyecto ||
-        (project === ALL_PROJECTS ? "Sin definir" : project),
+        supportQuestion?.proyectos.join(", ") || project || "Sin definir",
       nombre: form.name.trim(),
       dni: form.dni.trim(),
       email: form.email.trim(),
       telefono: form.phone.trim(),
-      etapa: supportQuestion?.etapa || stage || "Sin etapa",
+      etapa: supportQuestion?.etapas.join(", ") || stage || "Sin etapa",
       consulta: customQuery.trim(),
       preguntaId: supportQuestion?.id || null,
       preguntaOrigen: supportQuestion?.pregunta || null
@@ -300,26 +278,9 @@ export default function Home() {
 
       <div className="faq-shell">
         <section className="faq-search-card" aria-labelledby="faq-search-title">
-          <div className="faq-project-row">
-            <div>
-              <label htmlFor="faq-project">Proceso</label>
-              <p className="faq-field-help">Elegí uno o buscá en todos si no estás seguro.</p>
-            </div>
-            <select
-              id="faq-project"
-              value={project}
-              onChange={(event) => chooseProject(event.target.value)}
-            >
-              {projects.map((item) => (
-                <option key={item} value={item}>{item}</option>
-              ))}
-              <option value={ALL_PROJECTS}>No estoy seguro / buscar en todos</option>
-            </select>
-          </div>
-
           <div className="faq-search-block">
             <label id="faq-search-title" htmlFor="faq-search">
-              Escribí tu duda o algunas palabras
+              Buscá tu consulta
             </label>
             <div className="faq-search-input-wrap">
               <span aria-hidden="true" className="faq-search-icon">⌕</span>
@@ -328,7 +289,7 @@ export default function Home() {
                 type="search"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Ej.: inscripción, documentación, examen médico…"
+                placeholder="Escribí una pregunta o palabras como inscripción, documentación…"
                 autoComplete="off"
               />
               {search && (
@@ -337,31 +298,58 @@ export default function Home() {
                 </button>
               )}
             </div>
+            <p className="faq-search-help">
+              Podés buscar directamente en todas las preguntas o seleccionar un proyecto para acotar los resultados.
+            </p>
           </div>
 
-          <button
-            type="button"
-            className="faq-filter-toggle"
-            aria-expanded={showFilters}
-            onClick={() => setShowFilters((value) => !value)}
-          >
-            {showFilters ? "Ocultar filtros" : "Filtrar por etapa (opcional)"}
-            <span aria-hidden="true">{showFilters ? "▲" : "▼"}</span>
-          </button>
+          <div className="faq-project-filter">
+            <label htmlFor="faq-project">Seleccioná tu proyecto</label>
+            <select
+              id="faq-project"
+              value={project}
+              onChange={(event) => chooseProject(event.target.value)}
+            >
+              <option value="">Todos los proyectos (opcional)</option>
+              {projects.map((item) => (
+                <option key={item} value={item}>{item}</option>
+              ))}
+            </select>
+          </div>
 
-          {showFilters && (
-            <div className="faq-filter-panel">
-              <label htmlFor="faq-stage">Etapa del proceso</label>
-              <select
-                id="faq-stage"
-                value={stage}
-                onChange={(event) => setStage(event.target.value)}
-              >
-                <option value="">Todas las etapas</option>
-                {stages.map((item) => (
-                  <option key={item} value={item}>{item}</option>
+          {project && (
+            <div className="faq-timeline-wrap">
+              <div className="faq-timeline-heading">
+                <div>
+                  <span className="faq-eyebrow">Etapas del proyecto</span>
+                  <h2>Línea de tiempo de {project}</h2>
+                </div>
+                {stage && (
+                  <button type="button" onClick={() => setStage("")}>
+                    Ver todas las etapas
+                  </button>
+                )}
+              </div>
+              <div className="faq-timeline" aria-label={`Etapas de ${project}`}>
+                {PROCESS_TIMELINE.map((day) => (
+                  <div className="faq-timeline-day" key={day.day}>
+                    <strong className="faq-day-label">Día {day.day}</strong>
+                    <div className="faq-day-stages">
+                      {day.stages.map((item) => (
+                        <button
+                          type="button"
+                          key={item.value}
+                          className={stage === item.value ? "selected" : ""}
+                          aria-pressed={stage === item.value}
+                          onClick={() => setStage((current) => current === item.value ? "" : item.value)}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 ))}
-              </select>
+              </div>
             </div>
           )}
         </section>
@@ -369,12 +357,14 @@ export default function Home() {
         <section className="faq-results" aria-live="polite">
           <div className="faq-results-heading">
             <div>
-              <h2>{search ? "Resultados de búsqueda" : "Preguntas frecuentes"}</h2>
+              <h2>{search ? "Resultados de búsqueda" : project ? `Preguntas de ${project}` : "Preguntas frecuentes"}</h2>
               {!loadingFaqs && (
                 <p>
                   {filteredFaqs.length
                     ? `${filteredFaqs.length} pregunta${filteredFaqs.length === 1 ? "" : "s"} para consultar`
-                    : "No encontramos una pregunta relacionada"}
+                    : !search && !project
+                      ? "Escribí en el buscador o seleccioná un proyecto para comenzar"
+                      : "No encontramos una pregunta relacionada"}
                 </p>
               )}
             </div>
@@ -384,6 +374,11 @@ export default function Home() {
             <div className="faq-status">Cargando preguntas…</div>
           ) : faqError ? (
             <div className="faq-error">{faqError}</div>
+          ) : !search && !project ? (
+            <div className="faq-empty faq-empty-start">
+              <strong>¿Qué necesitás saber?</strong>
+              <p>Usá el buscador general o elegí tu proyecto para recorrer sus etapas.</p>
+            </div>
           ) : filteredFaqs.length ? (
             <div className="faq-question-list">
               {filteredFaqs.map((item) => (
@@ -396,7 +391,7 @@ export default function Home() {
                   <span className="faq-question-number">N.º {item.orden}</span>
                   <span className="faq-question-copy">
                     <strong>{item.pregunta}</strong>
-                    <small>{item.proyecto} · {item.etapa}</small>
+                    <small>{item.proyectos.join(", ")} · {item.etapas.join(", ")}</small>
                   </span>
                   <span className="faq-chevron" aria-hidden="true">›</span>
                 </button>
@@ -405,7 +400,7 @@ export default function Home() {
           ) : (
             <div className="faq-empty">
               <strong>Probá con menos palabras o con otro término.</strong>
-              <p>También podés buscar en todos los procesos o enviarnos tu consulta.</p>
+              <p>También podés quitar los filtros o enviarnos tu consulta.</p>
             </div>
           )}
 
@@ -529,8 +524,12 @@ export default function Home() {
               ×
             </button>
             <div className="faq-answer-meta">
-              <span>{selectedQuestion.proyecto}</span>
-              <span>{selectedQuestion.etapa}</span>
+              {selectedQuestion.proyectos.map((item) => (
+                <span key={`project-${item}`}>{item}</span>
+              ))}
+              {selectedQuestion.etapas.map((item) => (
+                <span key={`stage-${item}`}>{item}</span>
+              ))}
               <span>N.º {selectedQuestion.orden}</span>
             </div>
             <h2 id="faq-answer-title">{selectedQuestion.pregunta}</h2>
