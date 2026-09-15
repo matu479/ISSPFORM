@@ -859,3 +859,146 @@ body:has(.faq-page) {
     flex-direction: column;
   }
 }
+
+/* Buscador general, filtro por proyecto y línea de tiempo */
+.faq-search-help {
+  margin: 10px 0 0;
+  color: #65778b;
+  font-size: 13px;
+}
+
+.faq-project-filter {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(300px, 0.9fr);
+  align-items: center;
+  gap: 24px;
+  padding-top: 22px;
+  margin-top: 22px;
+  border-top: 1px solid #e5ebf2;
+}
+
+.faq-project-filter label {
+  margin: 0;
+  font-size: 17px;
+}
+
+.faq-timeline-wrap {
+  padding-top: 24px;
+  margin-top: 24px;
+  border-top: 1px solid #e5ebf2;
+}
+
+.faq-timeline-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 15px;
+}
+
+.faq-timeline-heading h2 {
+  margin: 0;
+  color: #0b355c;
+  font-size: 20px;
+}
+
+.faq-timeline-heading button {
+  padding: 7px 10px;
+  color: #0057a6;
+  background: #edf5fd;
+  border: 1px solid #b9d5ee;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.faq-timeline {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(150px, 1fr));
+  gap: 12px;
+  overflow-x: auto;
+  padding: 3px 3px 14px;
+  scrollbar-color: #84a9cb #edf3f8;
+}
+
+.faq-timeline-day {
+  position: relative;
+  min-width: 150px;
+  padding-top: 23px;
+  border-top: 2px solid #8ca3b8;
+}
+
+.faq-timeline-day::before {
+  position: absolute;
+  top: -5px;
+  left: 0;
+  width: 8px;
+  height: 8px;
+  content: "";
+  background: #0c4f8f;
+  border-radius: 50%;
+}
+
+.faq-day-label {
+  position: absolute;
+  top: 2px;
+  left: 0;
+  color: #38536c;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.faq-day-stages {
+  display: grid;
+  gap: 8px;
+}
+
+.faq-day-stages button {
+  width: 100%;
+  min-height: 62px;
+  padding: 10px;
+  color: #20384f;
+  background: #f8fbfe;
+  border: 1px solid #d4e0eb;
+  border-left: 4px solid #315f88;
+  border-radius: 5px;
+  cursor: pointer;
+  line-height: 1.3;
+  text-align: left;
+  transition: 0.18s ease;
+}
+
+.faq-day-stages button:hover {
+  background: #eef7ff;
+  border-color: #7fb6e5;
+}
+
+.faq-day-stages button.selected {
+  color: #fff;
+  background: #0057a6;
+  border-color: #0057a6;
+  box-shadow: 0 5px 14px rgba(0, 75, 145, 0.2);
+}
+
+.faq-empty-start {
+  padding-block: 34px;
+}
+
+@media (max-width: 720px) {
+  .faq-project-filter {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .faq-timeline-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .faq-timeline {
+    grid-template-columns: repeat(9, 145px);
+    margin-right: -14px;
+  }
+}
